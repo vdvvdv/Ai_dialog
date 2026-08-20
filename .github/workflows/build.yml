@@ -1,32 +1,29 @@
-name: Build APK 
-
+name: Build APK
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
+    branches: [main, master]
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.0'  # Актуальная версия на 2026 год
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Build APK
-        run: flutter build apk --release
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
+          flutter-version: '3.24.0'
+      - name: Save custom files
+        run: |
+          mkdir -p _backup
+          cp lib/main.dart _backup/
+          cp pubspec.yaml _backup/
+      - name: Create Flutter project
+        run: flutter create --overwrite --project-name kdsb_dialog .
+      - name: Restore custom files
+        run: |
+          cp _backup/main.dart lib/
+          cp _backup/pubspec.yaml .
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
         with:
-          name: app-release
+          name: release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
