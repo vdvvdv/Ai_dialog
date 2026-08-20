@@ -1,8 +1,21 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
 
-void main() => runApp(const MyApp());
+void main() {
+  HttpOverrides.global = MyHttpOverrides();
+  runApp(const MyApp());
+}
+
+class MyHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)
+      ..badCertificateCallback = (cert, host, port) => true
+      ..findProxy = HttpClient.findProxyFromEnvironment;
+  }
+}
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -34,6 +47,30 @@ class _ChatScreenState extends State<ChatScreen> {
   String _kimiKey = '';
   String _dsKey = '';
   String _target = 'both';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadKeys();
+  }
+
+  Future<void> _loadKeys() async {
+    final p = await SharedPreferences.getInstance();
+    setState(() {
+      _kimiKey = p.getString('kimi_key') ?? '';
+      _dsKey = p.getString('ds_key') ?? '';
+    });
+  }
+
+  Future<void> _saveKeys(String k, String d) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('kimi_key', k);
+    await p.setString('ds_key', d);
+    setState(() {
+      _kimiKey = k;
+      _dsKey = d;
+    });
+  }
 
   void _send(String text, String target) {
     if (text.trim().isEmpty) return;
@@ -72,13 +109,21 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<String> _api(String url, String key, String model, List<Map<String, String>> msgs) async {
-    final r = await http.post(
-      Uri.parse(url),
-      headers: {'Authorization': 'Bearer $key', 'Content-Type': 'application/json'},
-      body: jsonEncode({'model': model, 'messages': msgs, 'max_tokens': 2000}),
-    );
-    if (r.statusCode != 200) throw 'HTTP ${r.statusCode}';
-    final d = jsonDecode(r.body);
+    final client = HttpClient();
+    client.findProxy = HttpClient.findProxyFromEnvironment;
+    client.badCertificateCallback = (cert, host, port) => true;
+    
+    final request = await client.postUrl(Uri.parse(url));
+    request.headers.set('Authorization', 'Bearer $key');
+    request.headers.set('Content-Type', 'application/json; charset=utf-8');
+    request.write(jsonEncode({'model': model, 'messages': msgs, 'max_tokens': 2000}));
+    
+    final response = await request.close().timeout(const Duration(seconds: 30));
+    final body = await response.transform(utf8.decoder).join();
+    client.close();
+    
+    if (response.statusCode != 200) throw 'HTTP ${response.statusCode}';
+    final d = jsonDecode(body);
     final c = d['choices']?[0]?['message']?['content'];
     if (c == null || c.toString().trim().isEmpty) throw 'Empty response';
     return c.toString();
@@ -149,10 +194,7 @@ class _ChatScreenState extends State<ChatScreen> {
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           ElevatedButton(
             onPressed: () {
-              setState(() {
-                _kimiKey = kc.text;
-                _dsKey = dc.text;
-              });
+              _saveKeys(kc.text, dc.text);
               Navigator.pop(ctx);
             },
             child: const Text('Save'),
