@@ -24,44 +24,39 @@ jobs:
       - name: Update Kotlin version
         run: |
           sed -i 's/id "org.jetbrains.kotlin.android" version ".*"/id "org.jetbrains.kotlin.android" version "1.9.22" apply false/' android/settings.gradle
-      - name: Rewrite AndroidManifest
+      - name: Add INTERNET permission
         run: |
-          cat > android/app/src/main/AndroidManifest.xml << 'MANIFEST'
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <application
-        android:label="kdsb_dialog"
-        android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true">
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:launchMode="singleTop"
-            android:theme="@style/LaunchTheme"
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
-            android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize">
-            <meta-data
-              android:name="io.flutter.embedding.android.NormalTheme"
-              android:resource="@style/NormalTheme"
-              />
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.LAUNCHER"/>
-            </intent-filter>
-        </activity>
-        <meta-data
-            android:name="flutterEmbedding"
-            android:value="2" />
-    </application>
-</manifest>
-MANIFEST
-      - name: Enable code shrinking
-        run: |
-          sed -i 's/buildTypes {/buildTypes {\n        release {\n            minifyEnabled true\n            shrinkResources true\n            proguardFiles getDefaultProguardFile('\''proguard-android.txt'\''), '\''proguard-rules.pro'\''\n        }/' android/app/build.gradle
+          echo '<?xml version="1.0" encoding="utf-8"?>' > android/app/src/main/AndroidManifest.xml
+          echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android">' >> android/app/src/main/AndroidManifest.xml
+          echo '    <uses-permission android:name="android.permission.INTERNET" />' >> android/app/src/main/AndroidManifest.xml
+          echo '    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />' >> android/app/src/main/AndroidManifest.xml
+          echo '    <application' >> android/app/src/main/AndroidManifest.xml
+          echo '        android:label="kdsb_dialog"' >> android/app/src/main/AndroidManifest.xml
+          echo '        android:name="${applicationName}"' >> android/app/src/main/AndroidManifest.xml
+          echo '        android:icon="@mipmap/ic_launcher"' >> android/app/src/main/AndroidManifest.xml
+          echo '        android:usesCleartextTraffic="true">' >> android/app/src/main/AndroidManifest.xml
+          echo '        <activity' >> android/app/src/main/AndroidManifest.xml
+          echo '            android:name=".MainActivity"' >> android/app/src/main/AndroidManifest.xml
+          echo '            android:exported="true"' >> android/app/src/main/AndroidManifest.xml
+          echo '            android:launchMode="singleTop"' >> android/app/src/main/AndroidManifest.xml
+          echo '            android:theme="@style/LaunchTheme"' >> android/app/src/main/AndroidManifest.xml
+          echo '            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"' >> android/app/src/main/AndroidManifest.xml
+          echo '            android:hardwareAccelerated="true"' >> android/app/src/main/AndroidManifest.xml
+          echo '            android:windowSoftInputMode="adjustResize">' >> android/app/src/main/AndroidManifest.xml
+          echo '            <meta-data' >> android/app/src/main/AndroidManifest.xml
+          echo '              android:name="io.flutter.embedding.android.NormalTheme"' >> android/app/src/main/AndroidManifest.xml
+          echo '              android:resource="@style/NormalTheme"' >> android/app/src/main/AndroidManifest.xml
+          echo '              />' >> android/app/src/main/AndroidManifest.xml
+          echo '            <intent-filter>' >> android/app/src/main/AndroidManifest.xml
+          echo '                <action android:name="android.intent.action.MAIN"/>' >> android/app/src/main/AndroidManifest.xml
+          echo '                <category android:name="android.intent.category.LAUNCHER"/>' >> android/app/src/main/AndroidManifest.xml
+          echo '            </intent-filter>' >> android/app/src/main/AndroidManifest.xml
+          echo '        </activity>' >> android/app/src/main/AndroidManifest.xml
+          echo '        <meta-data' >> android/app/src/main/AndroidManifest.xml
+          echo '            android:name="flutterEmbedding"' >> android/app/src/main/AndroidManifest.xml
+          echo '            android:value="2" />' >> android/app/src/main/AndroidManifest.xml
+          echo '    </application>' >> android/app/src/main/AndroidManifest.xml
+          echo '</manifest>' >> android/app/src/main/AndroidManifest.xml
       - run: flutter pub get
       - run: flutter build apk --release --split-per-abi --target-platform android-arm64
       - uses: actions/upload-artifact@v4
