@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const MyApp());
 
@@ -35,30 +34,6 @@ class _ChatScreenState extends State<ChatScreen> {
   String _kimiKey = '';
   String _dsKey = '';
   String _target = 'both';
-
-  @override
-  void initState() {
-    super.initState();
-    _loadKeys();
-  }
-
-  Future<void> _loadKeys() async {
-    final p = await SharedPreferences.getInstance();
-    setState(() {
-      _kimiKey = p.getString('kimi_key') ?? '';
-      _dsKey = p.getString('ds_key') ?? '';
-    });
-  }
-
-  Future<void> _saveKeys(String k, String d) async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString('kimi_key', k);
-    await p.setString('ds_key', d);
-    setState(() {
-      _kimiKey = k;
-      _dsKey = d;
-    });
-  }
 
   void _send(String text, String target) {
     if (text.trim().isEmpty) return;
@@ -174,7 +149,10 @@ class _ChatScreenState extends State<ChatScreen> {
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           ElevatedButton(
             onPressed: () {
-              _saveKeys(kc.text, dc.text);
+              setState(() {
+                _kimiKey = kc.text;
+                _dsKey = dc.text;
+              });
               Navigator.pop(ctx);
             },
             child: const Text('Save'),
