@@ -11,9 +11,9 @@ void main() {
 class MyHttpOverrides extends HttpOverrides {
   @override
   HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context)
-      ..badCertificateCallback = (cert, host, port) => true
-      ..findProxy = HttpClient.findProxyFromEnvironment;
+    final client = super.createHttpClient(context);
+    client.badCertificateCallback = (cert, host, port) => true;
+    return client;
   }
 }
 
@@ -110,7 +110,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<String> _api(String url, String key, String model, List<Map<String, String>> msgs) async {
     final client = HttpClient();
-    client.findProxy = HttpClient.findProxyFromEnvironment;
     client.badCertificateCallback = (cert, host, port) => true;
     
     final request = await client.postUrl(Uri.parse(url));
