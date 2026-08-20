@@ -111,13 +111,14 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<String> _api(String url, String key, String model, List<Map<String, String>> msgs) async {
     final client = HttpClient();
     client.badCertificateCallback = (cert, host, port) => true;
+    client.connectionTimeout = const Duration(seconds: 30);
     
     final request = await client.postUrl(Uri.parse(url));
     request.headers.set('Authorization', 'Bearer $key');
     request.headers.set('Content-Type', 'application/json; charset=utf-8');
     request.write(jsonEncode({'model': model, 'messages': msgs, 'max_tokens': 2000}));
     
-    final response = await request.close().timeout(const Duration(seconds: 30));
+    final response = await request.close().timeout(const Duration(seconds: 90));
     final body = await response.transform(utf8.decoder).join();
     client.close();
     
