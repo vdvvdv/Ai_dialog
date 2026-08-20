@@ -2,64 +2,55 @@ name: Build APK
 on:
   push:
     branches: [main, master]
+  workflow_dispatch:   # ручной запуск из вкладки Actions
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          channel: stable
+          cache: true
+
       - name: Save custom files
         run: |
           mkdir -p _backup
           cp lib/main.dart _backup/
           cp pubspec.yaml _backup/
-      - name: Create Flutter project
-        run: flutter create --overwrite --project-name kdsb_dialog .
+
+      - name: Create Flutter project scaffolding
+        run: flutter create --overwrite --project-name ai_dialog --org com.example .
+
       - name: Restore custom files
         run: |
-          cp _backup/main.dart lib/
-          cp _backup/pubspec.yaml .
-      - name: Update Kotlin version
+          cp _backup/main.dart lib/main.dart
+          cp _backup/pubspec.yaml pubspec.yaml
+
+      - name: Add INTERNET permission to manifest
         run: |
-          sed -i 's/id "org.jetbrains.kotlin.android" version ".*"/id "org.jetbrains.kotlin.android" version "1.9.22" apply false/' android/settings.gradle
-      - name: Add INTERNET permission
+          sed -i '/<manifest/a\    <uses-permission android:name="android.permission.INTERNET"/>' \
+            android/app/src/main/AndroidManifest.xml
+
+      - name: Auto-bump versionCode from run number
         run: |
-          echo '<?xml version="1.0" encoding="utf-8"?>' > android/app/src/main/AndroidManifest.xml
-          echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android">' >> android/app/src/main/AndroidManifest.xml
-          echo '    <uses-permission android:name="android.permission.INTERNET" />' >> android/app/src/main/AndroidManifest.xml
-          echo '    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />' >> android/app/src/main/AndroidManifest.xml
-          echo '    <application' >> android/app/src/main/AndroidManifest.xml
-          echo '        android:label="kdsb_dialog"' >> android/app/src/main/AndroidManifest.xml
-          echo '        android:name="${applicationName}"' >> android/app/src/main/AndroidManifest.xml
-          echo '        android:icon="@mipmap/ic_launcher"' >> android/app/src/main/AndroidManifest.xml
-          echo '        android:usesCleartextTraffic="true">' >> android/app/src/main/AndroidManifest.xml
-          echo '        <activity' >> android/app/src/main/AndroidManifest.xml
-          echo '            android:name=".MainActivity"' >> android/app/src/main/AndroidManifest.xml
-          echo '            android:exported="true"' >> android/app/src/main/AndroidManifest.xml
-          echo '            android:launchMode="singleTop"' >> android/app/src/main/AndroidManifest.xml
-          echo '            android:theme="@style/LaunchTheme"' >> android/app/src/main/AndroidManifest.xml
-          echo '            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"' >> android/app/src/main/AndroidManifest.xml
-          echo '            android:hardwareAccelerated="true"' >> android/app/src/main/AndroidManifest.xml
-          echo '            android:windowSoftInputMode="adjustResize">' >> android/app/src/main/AndroidManifest.xml
-          echo '            <meta-data' >> android/app/src/main/AndroidManifest.xml
-          echo '              android:name="io.flutter.embedding.android.NormalTheme"' >> android/app/src/main/AndroidManifest.xml
-          echo '              android:resource="@style/NormalTheme"' >> android/app/src/main/AndroidManifest.xml
-          echo '              />' >> android/app/src/main/AndroidManifest.xml
-          echo '            <intent-filter>' >> android/app/src/main/AndroidManifest.xml
-          echo '                <action android:name="android.intent.action.MAIN"/>' >> android/app/src/main/AndroidManifest.xml
-          echo '                <category android:name="android.intent.category.LAUNCHER"/>' >> android/app/src/main/AndroidManifest.xml
-          echo '            </intent-filter>' >> android/app/src/main/AndroidManifest.xml
-          echo '        </activity>' >> android/app/src/main/AndroidManifest.xml
-          echo '        <meta-data' >> android/app/src/main/AndroidManifest.xml
-          echo '            android:name="flutterEmbedding"' >> android/app/src/main/AndroidManifest.xml
-          echo '            android:value="2" />' >> android/app/src/main/AndroidManifest.xml
-          echo '    </application>' >> android/app/src/main/AndroidManifest.xml
-          echo '</manifest>' >> android/app/src/main/AndroidManifest.xml
-      - run: flutter pub get
-      - run: flutter build apk --release
+          sed -i -E "s/^version: ([0-9.]+)\+[0-9]+/version: \1+${{ github.run_number }}/" pubspec.yaml
+          grep '^version:' pubspec.yaml
+
+      - name: flutter pub get
+        run: flutter pub get
+
+      - name: Analyze (non-blocking)
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings || true
+
+      - name: Build split APKs (release)
+        run: |
+          flutter build apk --release --split-per-abi \
+            --obfuscate --split-debug-info=./debug_info
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/app-*-release.apk
