@@ -2,19 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:async';
 
 void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Kimi ↔ DeepSeek Dialog',
+      title: 'Kimi <-> DeepSeek',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
-        colorScheme: ColorScheme.dark(primary: Colors.green.shade700),
         scaffoldBackgroundColor: const Color(0xFF0D1117),
       ),
       home: const ChatScreen(),
@@ -24,18 +22,19 @@ class MyApp extends StatelessWidget {
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
-
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
+
 class _ChatScreenState extends State<ChatScreen> {
-  final List<Map<String, String>> _history = [];
+  final List<Map<String, dynamic>> _history = [];
   final List<String> _inboxKimi = [];
   final List<String> _inboxDs = [];
-  final TextEditingController _controller = TextEditingController();
-  bool _isLoading = false;
+  final TextEditingController _ctrl = TextEditingController();
+  bool _loading = false;
   String _kimiKey = '';
   String _dsKey = '';
+  String _target = 'both';
 
   @override
   void initState() {
@@ -44,316 +43,264 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _loadKeys() async {
-    final prefs = await SharedPreferences.getInstance();
+    final p = await SharedPreferences.getInstance();
     setState(() {
-      _kimiKey = prefs.getString('kimi_key') ?? '';
-      _dsKey = prefs.getString('ds_key') ?? '';
+      _kimiKey = p.getString('kimi_key') ?? '';
+      _dsKey = p.getString('ds_key') ?? '';
     });
   }
 
-  Future<void> _saveKeys(String kimiKey, String dsKey) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('kimi_key', kimiKey);
-    await prefs.setString('ds_key', dsKey);
+  Future<void> _saveKeys(String k, String d) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('kimi_key', k);
+    await p.setString('ds_key', d);
     setState(() {
-      _kimiKey = kimiKey;
-      _dsKey = dsKey;
+      _kimiKey = k;
+      _dsKey = d;
     });
   }
 
-  void _sendMessage(String text, String target) {
+  void _send(String text, String target) {
     if (text.trim().isEmpty) return;
     setState(() {
-      _history.add({'role': 'user', 'content': text, 'target': target});
-      if (target == 'kimi') {
+      _history.add({'role': 'user', 'content': text});
+      if (target == 'kimi') _inboxKimi.add(text);
+      else if (target == 'ds') _inboxDs.add(text);
+      else {
         _inboxKimi.add(text);
-      } else {
         _inboxDs.add(text);
       }
     });
-    _controller.clear();
-    _processNextTurn();
+    _ctrl.clear();
   }
 
-  Future<void> _processNextTurn() async {
-    if (_isLoading) return;
-    setState(() => _isLoading = true);
-
-    try {
-      if (_inboxKimi.isNotEmpty) {
-        await _callKimi();
-      } else if (_inboxDs.isNotEmpty) {
-        await _callDeepSeek();
-      } else {
-        _inboxKimi.add('Начни диалог о разработке AI-приложений.');
-        await _callKimi();
-      }
-    } catch (e) {
-      setState(() {
-        _history.add({'role': 'system', 'content': '⚠️ Ошибка: $e', 'target': 'system'});
-      });
+  List<Map<String, String>> _buildMsgs(String who, String last) {
+    final msgs = <Map<String, String>>[];
+    msgs.add({
+      'role': 'system',
+      'content': who == 'kimi'
+          ? 'Ты — креативный генератор идей. Отвечай по-русски.'
+          : 'Ты — критический аналитик. Отвечай по-русски.'
+    });
+    for (final h in _history) {
+      final r = h['role'] as String;
+      final c = h['content'] as String;
+      if (c.trim().isEmpty) continue;
+      if (r == 'user') msgs.add({'role': 'user', 'content': c});
+      else if (r == 'kimi' && who == 'kimi') msgs.add({'role': 'assistant', 'content': c});
+      else if (r == 'ds' && who == 'ds') msgs.add({'role': 'assistant', 'content': c});
+      else if (r == 'kimi' && who == 'ds') msgs.add({'role': 'user', 'content': '[Kimi]: $c'});
+      else if (r == 'ds' && who == 'kimi') msgs.add({'role': 'user', 'content': '[DeepSeek]: $c'});
     }
+    msgs.add({'role': 'user', 'content': last});
+    return msgs;
+  }
 
-    setState(() => _isLoading = false);
+  Future<String> _api(String url, String key, String model, List<Map<String, String>> msgs) async {
+    final r = await http.post(
+      Uri.parse(url),
+      headers: {'Authorization': 'Bearer $key', 'Content-Type': 'application/json'},
+      body: jsonEncode({'model': model, 'messages': msgs, 'max_tokens': 2000}),
+    );
+    if (r.statusCode != 200) throw 'HTTP ${r.statusCode}';
+    final d = jsonDecode(r.body);
+    final c = d['choices']?[0]?['message']?['content'];
+    if (c == null || c.toString().trim().isEmpty) throw 'Empty response';
+    return c.toString();
   }
 
   Future<void> _callKimi() async {
     if (_kimiKey.isEmpty) {
-      _showKeyDialog('Kimi');
+      _keyDialog();
       return;
     }
-
-    final msg = _inboxKimi.removeAt(0);
-    final response = await _callApi('kimi', msg);
-    setState(() {
-      _history.add({'role': 'kimi', 'content': response, 'target': 'kimi'});
-      _inboxDs.add(response);
-    });
+    if (_inboxKimi.isEmpty) {
+      setState(() => _history.add({'role': 'sys', 'content': '⚠️ Нет сообщений для Kimi'}));
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      final t = _inboxKimi.removeAt(0);
+      final r = await _api('https://api.moonshot.ai/v1/chat/completions', _kimiKey, 'kimi-k2.6', _buildMsgs('kimi', t));
+      setState(() {
+        _history.add({'role': 'kimi', 'content': r});
+        _inboxDs.add(r);
+      });
+    } catch (e) {
+      setState(() => _history.add({'role': 'sys', 'content': '⚠️ Kimi: $e'}));
+    }
+    setState(() => _loading = false);
   }
 
-  Future<void> _callDeepSeek() async {
+  Future<void> _callDs() async {
     if (_dsKey.isEmpty) {
-      _showKeyDialog('DeepSeek');
+      _keyDialog();
       return;
     }
-
-    final msg = _inboxDs.removeAt(0);
-    final response = await _callApi('ds', msg);
-    setState(() {
-      _history.add({'role': 'ds', 'content': response, 'target': 'ds'});
-      _inboxKimi.add(response);
-    }); thanks 
-  }
-    Future<String> _callApi(String model, String prompt) async {
-    if (model == 'kimi') {
-      final url = Uri.parse('https://api.moonshot.cn/v1/chat/completions');
-      final response = await http.post(
-        url,
-        headers: {
-          'Authorization': 'Bearer $_kimiKey',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'model': 'moonshot-v1-8k',
-          'messages': [
-            {'role': 'user', 'content': prompt}
-          ],
-          'max_tokens': 2000,
-        }),
-      );
-      if (response.statusCode != 200) {
-        throw 'Kimi API error: ${response.statusCode}';
-      }
-      final data = jsonDecode(response.body);
-      return data['choices'][0]['message']['content'];
-    } else {
-      final url = Uri.parse('https://api.deepseek.com/v1/chat/completions');
-      final response = await http.post(
-        url,
-        headers: {
-          'Authorization': 'Bearer $_dsKey',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'model': 'deepseek-chat',
-          'messages': [
-            {'role': 'user', 'content': prompt}
-          ],
-          'max_tokens': 2000,
-        }),
-      );
-      if (response.statusCode != 200) {
-        throw 'DeepSeek API error: ${response.statusCode}';
-      }
-      final data = jsonDecode(response.body);
-      return data['choices'][0]['message']['content'];
+    if (_inboxDs.isEmpty) {
+      setState(() => _history.add({'role': 'sys', 'content': '⚠️ Нет сообщений для DeepSeek'}));
+      return;
     }
+    setState(() => _loading = true);
+    try {
+      final t = _inboxDs.removeAt(0);
+      final r = await _api('https://api.deepseek.com/v1/chat/completions', _dsKey, 'deepseek-chat', _buildMsgs('ds', t));
+      setState(() {
+        _history.add({'role': 'ds', 'content': r});
+        _inboxKimi.add(r);
+      });
+    } catch (e) {
+      setState(() => _history.add({'role': 'sys', 'content': '⚠️ DeepSeek: $e'}));
+    }
+    setState(() => _loading = false);
   }
 
-  void _showKeyDialog(String model) {
-    final kimiCtrl = TextEditingController(text: _kimiKey);
-    final dsCtrl = TextEditingController(text: _dsKey);
-
+  void _keyDialog() {
+    final kc = TextEditingController(text: _kimiKey);
+    final dc = TextEditingController(text: _dsKey);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('🔑 Введите API ключи'),
+        title: const Text('🔑 API Keys'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
-              controller: kimiCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Kimi API Key (Moonshot)',
-                hintText: 'sk-...',
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: dsCtrl,
-              decoration: const InputDecoration(
-                labelText: 'DeepSeek API Key',
-                hintText: 'sk-...',
-              ),
-            ),
+            TextField(controller: kc, decoration: const InputDecoration(labelText: 'Kimi Key')),
+            const SizedBox(height: 8),
+            TextField(controller: dc, decoration: const InputDecoration(labelText: 'DeepSeek Key')),
           ],
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Отмена'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           ElevatedButton(
             onPressed: () {
-              _saveKeys(kimiCtrl.text, dsCtrl.text);
+              _saveKeys(kc.text, dc.text);
               Navigator.pop(ctx);
             },
-            child: const Text('Сохранить'),
+            child: const Text('Save'),
           ),
         ],
       ),
     );
   }
 
+  Color _color(String r) {
+    if (r == 'user') return const Color(0xFF58A6FF);
+    if (r == 'kimi') return const Color(0xFFF0883E);
+    if (r == 'ds') return const Color(0xFF3FB950);
+    return Colors.grey;
+  }
+
+  String _label(String r) {
+    if (r == 'user') return '👤 Вы';
+    if (r == 'kimi') return '🔥 Kimi';
+    if (r == 'ds') return '🧊 DeepSeek';
+    return '⚙️ Система';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final fs = MediaQuery.of(context).size.width * 0.032;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('🤖 Kimi ↔ DeepSeek'),
+        title: const Text('🤖 Kimi ↔ DeepSeek', style: TextStyle(fontSize: 15)),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => _showKeyDialog(''),
-          ),
-          const SizedBox(width: 8),
+          IconButton(icon: const Icon(Icons.settings), onPressed: _keyDialog),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: const Color(0xFF1F2937),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: const Color(0xFF30363D)),
-            ),
+            margin: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(color: const Color(0xFF1F2937), borderRadius: BorderRadius.circular(12)),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('📨 Kimi: ', style: TextStyle(fontSize: 11)),
-                Text(
-                  '${_inboxKimi.length}',
-                  style: const TextStyle(
-                    color: Color(0xFF58A6FF),
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                Text('K: ${_inboxKimi.length}', style: const TextStyle(color: Color(0xFF58A6FF), fontSize: 12, fontWeight: FontWeight.bold)),
                 const SizedBox(width: 8),
-                const Text('DS: ', style: TextStyle(fontSize: 11)),
-                Text(
-                  '${_inboxDs.length}',
-                  style: const TextStyle(
-                    color: Color(0xFFF0883E),
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                Text('D: ${_inboxDs.length}', style: const TextStyle(color: Color(0xFFF0883E), fontSize: 12, fontWeight: FontWeight.bold)),
               ],
             ),
           ),
-          const SizedBox(width: 8),
         ],
       ),
       body: Column(
         children: [
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'kimi', label: Text('Kimi', style: TextStyle(fontSize: 12))),
+              ButtonSegment(value: 'both', label: Text('Both', style: TextStyle(fontSize: 12))),
+              ButtonSegment(value: 'ds', label: Text('DeepSeek', style: TextStyle(fontSize: 12))),
+            ],
+            selected: {_target},
+            onSelectionChanged: (s) => setState(() => _target = s.first),
+          ),
           Padding(
-            padding: const EdgeInsets.all(8.0),
+            padding: const EdgeInsets.all(6),
             child: Row(
               children: [
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: _isLoading ? null : () => _processNextTurn(),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green.shade700,
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                    ),
-                    child: const Text('▶ Kimi turn'),
+                    onPressed: _loading ? null : _callKimi,
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade700, padding: const EdgeInsets.symmetric(vertical: 6)),
+                    child: Text('▶ Kimi', style: TextStyle(fontSize: fs)),
                   ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 6),
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: _isLoading ? null : () => _processNextTurn(),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.orange.shade700,
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                    ),
-                    child: const Text('▶ DeepSeek turn'),
+                    onPressed: _loading ? null : _callDs,
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.orange.shade700, padding: const EdgeInsets.symmetric(vertical: 6)),
+                    child: Text('▶ DeepSeek', style: TextStyle(fontSize: fs)),
                   ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 6),
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: _isLoading ? null : () {
-                      if (_inboxKimi.isEmpty && _inboxDs.isEmpty) {
-                        _inboxKimi.add('Начни диалог о разработке AI-приложений.');
-                      }
-                      _processNextTurn();
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue.shade700,
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                    ),
-                    child: const Text('⏩ Auto'),
+                    onPressed: _loading
+                        ? null
+                        : () async {
+                            if (_inboxKimi.isNotEmpty) {
+                              await _callKimi();
+                              await Future.delayed(const Duration(milliseconds: 500));
+                              await _callDs();
+                            } else if (_inboxDs.isNotEmpty) {
+                              await _callDs();
+                              await Future.delayed(const Duration(milliseconds: 500));
+                              await _callKimi();
+                            } else {
+                              _inboxKimi.add('Начни диалог.');
+                              await _callKimi();
+                              await Future.delayed(const Duration(milliseconds: 500));
+                              await _callDs();
+                            }
+                          },
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.blue.shade700, padding: const EdgeInsets.symmetric(vertical: 6)),
+                    child: Text('⏩ Auto', style: TextStyle(fontSize: fs)),
                   ),
                 ),
               ],
             ),
           ),
+          if (_loading) const LinearProgressIndicator(minHeight: 2),
           Expanded(
             child: ListView.builder(
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.all(6),
               itemCount: _history.length,
-              itemBuilder: (ctx, index) {
-                final msg = _history[index];
-                final role = msg['role']!;
-                final content = msg['content']!;
-                
-                Color color;
-                String label;
-                if (role == 'user') {
-                  color = const Color(0xFF58A6FF);
-                  label = '👤 Вы';
-                } else if (role == 'kimi') {
-                  color = const Color(0xFFF0883E);
-                  label = '🔥 Kimi';
-                } else if (role == 'ds') {
-                  color = const Color(0xFFF0883E);
-                  label = '🧊 DeepSeek';
-                } else {
-                  color = Colors.grey;
-                  label = '⚙️ Система';
-                }
-
+              itemBuilder: (ctx, i) {
+                final m = _history[i];
+                final r = m['role'] as String;
+                final c = m['content'] as String;
                 return Container(
-                  margin: const EdgeInsets.only(bottom: 6),
-                  padding: const EdgeInsets.all(8),
+                  margin: const EdgeInsets.only(bottom: 4),
+                  padding: const EdgeInsets.all(6),
                   decoration: BoxDecoration(
-                    color: role == 'user' ? const Color(0xFF0D1117) : const Color(0xFF1F2937),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border(left: BorderSide(color: color, width: 3)),
+                    color: r == 'user' ? const Color(0xFF0D1117) : const Color(0xFF1F2937),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border(left: BorderSide(color: _color(r), width: 3)),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        label,
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: Colors.grey.shade500,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        content,
-                        style: const TextStyle(fontSize: 13),
-                      ),
+                      Text(_label(r), style: TextStyle(fontSize: fs * 0.75, color: Colors.grey.shade500, fontWeight: FontWeight.bold)),
+                      SelectableText(c, style: TextStyle(fontSize: fs, height: 1.2)),
                     ],
                   ),
                 );
@@ -361,29 +308,27 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.all(8.0),
+            padding: const EdgeInsets.all(6),
             child: Row(
               children: [
                 Expanded(
                   child: TextField(
-                    controller: _controller,
-                    style: const TextStyle(fontSize: 13),
-                    decoration: const InputDecoration(
-                      hintText: 'Написать одному из ИИ...',
-                      border: OutlineInputBorder(),
-                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    controller: _ctrl,
+                    style: TextStyle(fontSize: fs),
+                    decoration: InputDecoration(
+                      hintText: 'To $_target...',
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      border: const OutlineInputBorder(),
                     ),
-                    onSubmitted: (text) => _sendMessage(text, 'kimi'),
+                    onSubmitted: (t) => _send(t, _target),
                   ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 6),
                 IconButton(
-                  onPressed: () => _sendMessage(_controller.text, 'kimi'),
+                  onPressed: () => _send(_ctrl.text, _target),
                   icon: const Icon(Icons.send, color: Color(0xFF58A6FF)),
-                ),
-                IconButton(
-                  onPressed: () => _sendMessage(_controller.text, 'ds'),
-                  icon: const Icon(Icons.send, color: Color(0xFFF0883E)),
+                  iconSize: 22,
                 ),
               ],
             ),
