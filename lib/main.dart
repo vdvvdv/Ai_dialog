@@ -41,8 +41,8 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  static const _kimiUrl = 'https://api.moonshot.ai/v1/chat/completions';
-  static const _dsUrl = 'https://api.deepseek.com/v1/chat/completions';
+  static const _kimiUrl = 'https://api.moonshot.ai/v1/chat/completions'\;
+  static const _dsUrl = 'https://api.deepseek.com/v1/chat/completions'\;
 
   static const _kimiModels = [
     'kimi-k2.6',
@@ -65,6 +65,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _loading = false;
   bool _autoLoop = false;
+  bool _showThinking = true;
+  String _status = '';
   String _kimiKey = '';
   String _dsKey = '';
   String _kimiModel = 'kimi-k2.6';
@@ -88,6 +90,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _dsModel = p.getString('ds_model') ?? _dsModel;
       _maxTokens = p.getInt('max_tokens') ?? _maxTokens;
       _timeoutSec = p.getInt('timeout_sec') ?? _timeoutSec;
+      _showThinking = p.getBool('show_thinking') ?? _showThinking;
     });
   }
 
@@ -99,6 +102,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await p.setString('ds_model', _dsModel);
     await p.setInt('max_tokens', _maxTokens);
     await p.setInt('timeout_sec', _timeoutSec);
+    await p.setBool('show_thinking', _showThinking);
   }
 
   // ---------- Отправка ----------
@@ -133,7 +137,7 @@ class _ChatScreenState extends State<ChatScreen> {
     for (final h in _history) {
       final r = h['role'] as String;
       final c = h['content'] as String;
-      if (c.trim().isEmpty || c == '…') continue;
+      if (c.trim().isEmpty || c == '…' || c.startsWith('💭')) continue;
       if (r == 'user') {
         msgs.add({'role': 'user', 'content': c});
       } else if (r == 'kimi' && who == 'kimi') {
@@ -149,11 +153,11 @@ class _ChatScreenState extends State<ChatScreen> {
     return msgs;
   }
 
-  // ---------- Потоковый запрос ----------
+  // ---------- Потоковый запрос с авто-повтором ----------
 
-  /// Возвращает полный текст ответа, по мере поступления вызывает onChunk.
-  /// При пустом ответе бросает исключение с диагностикой (finish_reason, usage).
-  Future<String> _apiStream(String url, String key, String model,
+  /// Одиночная попытка запроса. Учитывает и content, и reasoning_content
+  /// («думающие» модели: kimi-k2.6, deepseek-reasoner).
+  Future<String> _apiOnce(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk) async {
     final client = HttpClient();
     client.badCertificateCallback = (cert, host, port) => true;
@@ -161,7 +165,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
     String finishReason = '';
     String usage = '';
-    final buf = StringBuffer();
+    final buf = StringBuffer();       // финальный ответ (content)
+    final thinkBuf = StringBuffer();  // размышления (reasoning_content)
     try {
       final request = await client.postUrl(Uri.parse(url));
       request.headers.set('Authorization', 'Bearer $key');
@@ -199,28 +204,38 @@ class _ChatScreenState extends State<ChatScreen> {
           try {
             final j = jsonDecode(data);
             final choice = j['choices']?[0];
-            final delta = choice?['delta']?['content'];
+            final delta = choice?['delta'];
             final fr = choice?['finish_reason'];
             if (fr != null) finishReason = fr.toString();
             if (j['usage'] != null) usage = j['usage'].toString();
             if (delta != null) {
-              buf.write(delta);
-              onChunk(buf.toString());
+              final rc = delta['reasoning_content'];
+              final c = delta['content'];
+              if (rc != null) thinkBuf.write(rc);
+              if (c != null) buf.write(c);
+              // Отображение: ответ; пока его нет — ход размышлений.
+              if (buf.isNotEmpty) {
+                onChunk(buf.toString());
+              } else if (thinkBuf.isNotEmpty) {
+                final t = thinkBuf.toString();
+                final tail = t.length > 500 ? '…${t.substring(t.length - 500)}' : t;
+                onChunk('💭 $tail');
+              }
             }
           } catch (_) {
             // неполная строка JSON — пропускаем
           }
         }
       }
-    } on TimeoutException {
-      throw 'Таймаут: нет данных ${_timeoutSec}с (сгенерировано ${buf.length} симв.)';
     } finally {
       client.close();
     }
 
     final result = buf.toString();
     if (result.trim().isEmpty) {
+      final thought = thinkBuf.length;
       throw 'Пустой ответ (finish_reason: ${finishReason.isEmpty ? "нет" : finishReason}'
+          '${thought > 0 ? ", размышлений: $thought симв. — возможно, max_tokens=$_maxTokens ушёл на них; увеличьте лимит" : ""}'
           '${usage.isEmpty ? "" : ", usage: $usage"})';
     }
     if (finishReason == 'length') {
@@ -228,6 +243,45 @@ class _ChatScreenState extends State<ChatScreen> {
           '(увеличьте лимит в настройках). Получено: ${result.length} симв.';
     }
     return result;
+  }
+
+  /// Вытаскивает из текста ошибки "try again after N seconds".
+  int _retryAfterSec(String err) {
+    final m = RegExp(r'after (\d+) second').firstMatch(err);
+    if (m != null) return int.tryParse(m.group(1)!) ?? 0;
+    return 0;
+  }
+
+  /// Запрос с автоматическим повтором при 429 / 5xx / сетевых сбоях.
+  Future<String> _apiStream(String url, String key, String model,
+      List<Map<String, String>> msgs, void Function(String) onChunk) async {
+    const maxAttempts = 6;
+    var attempt = 0;
+    while (true) {
+      attempt++;
+      try {
+        return await _apiOnce(url, key, model, msgs, onChunk);
+      } catch (e) {
+        final err = e.toString();
+        // Не повторяем ошибки авторизации/запроса — их retry не вылечит.
+        final noRetry = err.startsWith('HTTP 400') ||
+            err.startsWith('HTTP 401') ||
+            err.startsWith('HTTP 403') ||
+            err.startsWith('HTTP 404') ||
+            err.startsWith('Ответ обрезан');
+        if (noRetry || attempt >= maxAttempts) rethrow;
+
+        var wait = _retryAfterSec(err);
+        if (wait <= 0) wait = 2 * attempt; // нарастающая пауза: 2,4,6...
+        if (wait > 30) wait = 30;
+        if (mounted) {
+          setState(() => _status =
+              '⏳ Лимит API, повтор $attempt/$maxAttempts через ${wait}с…');
+        }
+        await Future.delayed(Duration(seconds: wait));
+        if (mounted) setState(() => _status = '');
+      }
+    }
   }
 
   // ---------- Вызовы моделей ----------
@@ -327,7 +381,8 @@ class _ChatScreenState extends State<ChatScreen> {
       } else {
         break;
       }
-      await Future.delayed(const Duration(milliseconds: 500));
+      // Пауза между ходами — бережём лимит параллельности API.
+      await Future.delayed(const Duration(seconds: 2));
     }
     if (mounted) setState(() => _autoLoop = false);
   }
@@ -349,6 +404,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final tc = TextEditingController(text: _timeoutSec.toString());
     String km = _kimiModel;
     String dm = _dsModel;
+    bool showThink = _showThinking;
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -401,6 +457,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   decoration: const InputDecoration(
                       labelText: 'Таймаут паузы потока, сек'),
                 ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Показывать ход размышлений',
+                      style: TextStyle(fontSize: 14)),
+                  value: showThink,
+                  onChanged: (v) => setD(() => showThink = v),
+                ),
               ],
             ),
           ),
@@ -416,6 +479,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   _dsModel = dm;
                   _maxTokens = int.tryParse(mc.text) ?? _maxTokens;
                   _timeoutSec = int.tryParse(tc.text) ?? _timeoutSec;
+                  _showThinking = showThink;
                 });
                 _saveSettings();
                 Navigator.pop(ctx);
@@ -552,6 +616,12 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           if (_loading) const LinearProgressIndicator(minHeight: 2),
+          if (_status.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Text(_status,
+                  style: const TextStyle(fontSize: 12, color: Colors.amber)),
+            ),
           Expanded(
             child: ListView.builder(
               controller: _scroll,
@@ -561,6 +631,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 final m = _history[i];
                 final r = m['role'] as String;
                 final c = m['content'] as String;
+                final thinking = c.startsWith('💭');
                 return Container(
                   margin: const EdgeInsets.only(bottom: 4),
                   padding: const EdgeInsets.all(6),
@@ -580,7 +651,16 @@ class _ChatScreenState extends State<ChatScreen> {
                               fontSize: fs * 0.75,
                               color: Colors.grey.shade500,
                               fontWeight: FontWeight.bold)),
-                      SelectableText(c, style: TextStyle(fontSize: fs, height: 1.2)),
+                      SelectableText(
+                        c,
+                        style: TextStyle(
+                          fontSize: thinking ? fs * 0.85 : fs,
+                          height: 1.2,
+                          color: thinking ? Colors.grey.shade400 : null,
+                          fontStyle:
+                              thinking ? FontStyle.italic : FontStyle.normal,
+                        ),
+                      ),
                     ],
                   ),
                 );
@@ -759,8 +839,7 @@ class _QueueScreenState extends State<QueueScreen> {
           _section('Очередь Kimi', const Color(0xFF58A6FF), widget.inboxKimi),
           const Divider(),
           _section('Очередь DeepSeek', const Color(0xFFF0883E), widget.inboxDs),
-        ],
-      ),
+        ],      ),
     );
   }
 }
