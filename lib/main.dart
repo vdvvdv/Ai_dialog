@@ -49,6 +49,7 @@ class _ChatScreenState extends State<ChatScreen> {
       String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
 
   static const _kimiModels = [
+    'kimi-k2.7-code',
     'kimi-k2.6',
     'kimi-k3',
     'kimi-k2-0905-preview',
