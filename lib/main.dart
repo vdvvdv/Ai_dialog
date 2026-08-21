@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -44,11 +45,13 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   static const _kimiUrl = 'https://api.moonshot.ai/v1/chat/completions';
   static const _dsUrl = 'https://api.deepseek.com/v1/chat/completions';
+  static const _appVersion =
+      String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
 
   static const _kimiModels = [
-    'kimi-k2-0905-preview',
-    'kimi-k3',
     'kimi-k2.6',
+    'kimi-k3',
+    'kimi-k2-0905-preview',
     'kimi-k2.5',
     'moonshot-v1-8k',
     'moonshot-v1-32k',
@@ -59,24 +62,31 @@ class _ChatScreenState extends State<ChatScreen> {
     'deepseek-reasoner',
   ];
   static const _efforts = ['default', 'low', 'medium', 'high'];
+  static const _strategies = ['smart', 'last20', 'full'];
 
   final List<Map<String, String>> _history = [];
   final List<String> _inboxKimi = [];
   final List<String> _inboxDs = [];
+  final List<String> _errorLog = [];
   final TextEditingController _ctrl = TextEditingController();
   final ScrollController _scroll = ScrollController();
 
   bool _loading = false;
   bool _autoLoop = false;
+  bool _stopRequested = false;
+  bool _awaitingComment = false;
   bool _showThinking = true;
   String _status = '';
   String _kimiKey = '';
   String _dsKey = '';
-  String _kimiModel = 'kimi-k2-0905-preview';
+  String _kimiModel = 'kimi-k2.6';
   String _dsModel = 'deepseek-chat';
   String _reasoningEffort = 'default';
-  int _maxTokens = 4000;
+  String _keepStrategy = 'smart';
+  String _historySummary = '';
+  int _maxTokens = 32000;
   int _timeoutSec = 180;
+  int _step = 0;
   String _target = 'both';
 
   @override
@@ -93,6 +103,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _kimiModel = p.getString('kimi_model') ?? _kimiModel;
       _dsModel = p.getString('ds_model') ?? _dsModel;
       _reasoningEffort = p.getString('reasoning_effort') ?? _reasoningEffort;
+      _keepStrategy = p.getString('keep_strategy') ?? _keepStrategy;
       _maxTokens = p.getInt('max_tokens') ?? _maxTokens;
       _timeoutSec = p.getInt('timeout_sec') ?? _timeoutSec;
       _showThinking = p.getBool('show_thinking') ?? _showThinking;
@@ -106,9 +117,36 @@ class _ChatScreenState extends State<ChatScreen> {
     await p.setString('kimi_model', _kimiModel);
     await p.setString('ds_model', _dsModel);
     await p.setString('reasoning_effort', _reasoningEffort);
+    await p.setString('keep_strategy', _keepStrategy);
     await p.setInt('max_tokens', _maxTokens);
     await p.setInt('timeout_sec', _timeoutSec);
     await p.setBool('show_thinking', _showThinking);
+  }
+
+  // ---------- Утилиты ----------
+
+  void _logError(String who, String err) {
+    final t = DateTime.now().toString().substring(11, 19);
+    _errorLog.add('[$t] $who: $err');
+    if (_errorLog.length > 100) _errorLog.removeAt(0);
+  }
+
+  /// Приблизительная оценка токенов (рус+англ ~3 симв/токен).
+  int _estTokens(List<Map<String, String>> msgs) {
+    var chars = 0;
+    for (final m in msgs) {
+      chars += (m['content'] ?? '').length;
+    }
+    return chars ~/ 3;
+  }
+
+  /// Контекстное окно модели (динамической справки у API нет — таблица).
+  int _contextLimit(String model) {
+    if (model.contains('128k')) return 128000;
+    if (model.contains('32k')) return 32000;
+    if (model.contains('8k')) return 8192;
+    if (model.startsWith('deepseek')) return 64000;
+    return 131072; // kimi-k2 / k3 семейство
   }
 
   // ---------- Отправка ----------
@@ -130,6 +168,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollBottom();
   }
 
+  /// Формирует messages с учётом стратегии истории.
   List<Map<String, String>> _buildMsgs(String who) {
     final msgs = <Map<String, String>>[];
     msgs.add({
@@ -138,6 +177,8 @@ class _ChatScreenState extends State<ChatScreen> {
           ? 'Ты — креативный генератор идей. Отвечай по-русски.'
           : 'Ты — критический аналитик. Отвечай по-русски.'
     });
+
+    final conv = <Map<String, String>>[];
     for (final h in _history) {
       final r = h['role'] as String;
       var c = h['content'] as String;
@@ -145,24 +186,96 @@ class _ChatScreenState extends State<ChatScreen> {
       final cut = c.indexOf('\n\n⚠️ (');
       if (cut > 0) c = c.substring(0, cut);
       if (r == 'user') {
-        msgs.add({'role': 'user', 'content': c});
+        conv.add({'role': 'user', 'content': c});
       } else if (r == 'kimi' && who == 'kimi') {
-        msgs.add({'role': 'assistant', 'content': c});
+        conv.add({'role': 'assistant', 'content': c});
       } else if (r == 'ds' && who == 'ds') {
-        msgs.add({'role': 'assistant', 'content': c});
+        conv.add({'role': 'assistant', 'content': c});
       } else if (r == 'kimi' && who == 'ds') {
-        msgs.add({'role': 'user', 'content': '[Kimi]: $c'});
+        conv.add({'role': 'user', 'content': '[Kimi]: $c'});
       } else if (r == 'ds' && who == 'kimi') {
-        msgs.add({'role': 'user', 'content': '[DeepSeek]: $c'});
+        conv.add({'role': 'user', 'content': '[DeepSeek]: $c'});
       }
+    }
+
+    switch (_keepStrategy) {
+      case 'last20':
+        msgs.addAll(conv.length > 20 ? conv.sublist(conv.length - 20) : conv);
+        break;
+      case 'smart':
+        if (_historySummary.isNotEmpty) {
+          msgs.add({
+            'role': 'user',
+            'content': '[Резюме предыдущего диалога]: $_historySummary'
+          });
+        }
+        msgs.addAll(conv.length > 10 ? conv.sublist(conv.length - 10) : conv);
+        break;
+      default: // full
+        msgs.addAll(conv);
     }
     return msgs;
   }
 
+  /// Авто-сжатие истории при приближении к лимиту контекста (>90%).
+  Future<void> _compressIfNeeded(String who, List<Map<String, String>> msgs) async {
+    final model = who == 'kimi' ? _kimiModel : _dsModel;
+    final limit = _contextLimit(model);
+    final est = _estTokens(msgs);
+    if (est < limit * 0.9) return;
+
+    if (mounted) {
+      setState(() => _status =
+          '🗜 Контекст ~$est из $limit токенов (>90%) — сжимаю историю…');
+    }
+    try {
+      final url = who == 'kimi' ? _kimiUrl : _dsUrl;
+      final key = who == 'kimi' ? _kimiKey : _dsKey;
+      final text = _history
+          .map((h) => '${h['role']}: ${h['content']}')
+          .join('\n')
+          .replaceAll(RegExp(r'\n\n⚠️ \([^\n]*'), '');
+      final resp = await http
+          .post(Uri.parse(url),
+              headers: {
+                'Authorization': 'Bearer $key',
+                'Content-Type': 'application/json; charset=utf-8',
+                'Accept-Encoding': 'gzip',
+              },
+              body: jsonEncode({
+                'model': model,
+                'messages': [
+                  {
+                    'role': 'user',
+                    'content':
+                        'Сожми этот диалог в 2–3 предложения: что обсуждали, какие решения приняты. '
+                            'Код и схемы перечисли отдельно списком, не сокращая.\n\n$text'
+                  }
+                ],
+                'max_tokens': 1000,
+              }))
+          .timeout(const Duration(seconds: 90));
+      if (resp.statusCode == 200) {
+        final d = jsonDecode(utf8.decode(resp.bodyBytes));
+        final s = d['choices']?[0]?['message']?['content']?.toString() ?? '';
+        if (s.isNotEmpty) {
+          setState(() {
+            _historySummary = s;
+            _keepStrategy = 'smart';
+            _history.add({'role': 'sys', 'content': '🗜 История сжата в резюме'});
+            _status = '';
+          });
+          _saveSettings();
+        }
+      }
+    } catch (e) {
+      _logError('compress', e.toString());
+      if (mounted) setState(() => _status = '⚠️ Сжатие не удалось, продолжаю как есть');
+    }
+  }
+
   // ---------- Потоковый запрос ----------
 
-  /// Один запрос — один проход по потоку.
-  /// Обрыв ПОСЛЕ получения данных = частичный ответ с пометкой, без retry.
   Future<String> _apiOnce(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk) async {
     final client = http.Client();
@@ -179,8 +292,6 @@ class _ChatScreenState extends State<ChatScreen> {
       request.headers['Content-Type'] = 'application/json; charset=utf-8';
       request.headers['Accept'] = 'text/event-stream';
       request.headers['Cache-Control'] = 'no-cache';
-      // ВАЖНО: только gzip. Kimi отдаёт SSE в brotli (br), что ломает
-      // поток в HTTP-клиентах (известный баг, github hermes-agent#28043).
       request.headers['Accept-Encoding'] = 'gzip';
       request.headers['Connection'] = 'keep-alive';
 
@@ -200,8 +311,8 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       request.body = jsonEncode(body);
 
-      final response = await client.send(request)
-          .timeout(const Duration(seconds: 60));
+      final response =
+          await client.send(request).timeout(const Duration(seconds: 60));
 
       if (response.statusCode != 200) {
         final errBody = await response.stream.bytesToString();
@@ -210,7 +321,6 @@ class _ChatScreenState extends State<ChatScreen> {
         throw 'HTTP ${response.statusCode}: $short';
       }
 
-      // Таймаут применяется к паузе МЕЖДУ порциями потока.
       final lines = response.stream
           .transform(utf8.decoder)
           .transform(const LineSplitter())
@@ -246,12 +356,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 onChunk('💭 $tail');
               }
             }
-          } catch (_) {
-            // неполная строка JSON — пропускаем
-          }
+          } catch (_) {}
         }
       } catch (e) {
-        // Обрыв посреди потока: данные есть — работаем с частичным ответом.
         if (buf.isNotEmpty || thinkBuf.isNotEmpty) {
           broken = true;
         } else {
@@ -263,9 +370,13 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     if (usage != null && mounted) {
+      final lim = _contextLimit(model);
+      final pt = usage!['prompt_tokens'] ?? 0;
+      final pct = lim > 0 ? (100 * pt / lim).toStringAsFixed(0) : '?';
       setState(() => _status =
-          '📊 токены: вх ${usage!['prompt_tokens'] ?? '?'} / вых ${usage!['completion_tokens'] ?? '?'}'
-          '${usage!['reasoning_tokens'] != null ? ' (разм: ${usage!['reasoning_tokens']})' : ''}');
+          '📊 вх $pt / вых ${usage!['completion_tokens'] ?? '?'}'
+          '${usage!['reasoning_tokens'] != null ? ' (разм: ${usage!['reasoning_tokens']})' : ''}'
+          ' · контекст $pct%');
     }
 
     var result = buf.toString();
@@ -274,17 +385,18 @@ class _ChatScreenState extends State<ChatScreen> {
       final thought = thinkBuf.length;
       if (broken && thought > 0) {
         throw 'Обрыв во время размышлений ($thought симв.), ответ не начался. '
-            'Попробуйте модель без размышлений или понизьте reasoning_effort.';
+            'Понизьте reasoning_effort или смените модель.';
       }
       throw 'Пустой ответ (finish_reason: ${finishReason.isEmpty ? "нет" : finishReason}'
-          '${thought > 0 ? ", размышлений: $thought симв. — возможно, лимит $_maxTokens ушёл на них" : ""}'
+          '${thought > 0 ? ", размышлений: $thought симв." : ""}'
           '${usage != null ? ", usage: $usage" : ""})';
     }
 
     if (broken) {
       result += '\n\n⚠️ (соединение оборвалось — ответ неполный)';
     } else if (finishReason == 'length') {
-      result += '\n\n⚠️ (ответ обрезан по лимиту $_maxTokens токенов — увеличьте в настройках)';
+      result +=
+          '\n\n⚠️ (ответ обрезан по лимиту $_maxTokens токенов — увеличьте в настройках)';
     }
     return result;
   }
@@ -295,7 +407,7 @@ class _ChatScreenState extends State<ChatScreen> {
     return 0;
   }
 
-  /// Retry ТОЛЬКО если не получено ни байта (429, 5xx, мгновенный обрыв).
+  /// Retry ТОЛЬКО если не получено ни байта.
   Future<String> _apiStream(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk) async {
     const maxAttempts = 4;
@@ -344,34 +456,46 @@ class _ChatScreenState extends State<ChatScreen> {
     if (inbox.isEmpty) {
       setState(() => _history.add({
             'role': 'sys',
-            'content': '⚠️ Нет сообщений для ${who == 'kimi' ? 'Kimi' : 'DeepSeek'}'
+            'content':
+                '⚠️ Нет сообщений для ${who == 'kimi' ? 'Kimi' : 'DeepSeek'}'
           }));
       return;
     }
     final msgs = _buildMsgs(who);
+    await _compressIfNeeded(who, msgs);
+    final finalMsgs = _buildMsgs(who); // пересборка после возможного сжатия
+
+    final step = ++_step;
+    final sw = Stopwatch()..start();
     setState(() {
       _loading = true;
       _status = '';
-      _history.add({'role': who, 'content': '…'});
+      _history.add({'role': who, 'content': '…', 'step': '$step'});
     });
     final idx = _history.length - 1;
     _scrollBottom();
     try {
-      final r = await _apiStream(url, key, model, msgs, (partial) {
+      final r = await _apiStream(url, key, model, finalMsgs, (partial) {
         if (mounted) setState(() => _history[idx]['content'] = partial);
       });
+      sw.stop();
       setState(() {
         inbox.removeAt(0);
         _history[idx]['content'] = r;
+        _history[idx]['secs'] = '${sw.elapsed.inSeconds}';
         otherInbox.add(r);
       });
       _scrollBottom();
     } catch (e) {
+      sw.stop();
       setState(() {
         _history.removeAt(idx);
         _autoLoop = false;
       });
-      _retrySnack(who == 'kimi' ? 'Kimi' : 'DeepSeek', e);
+      final whoName = who == 'kimi' ? 'Kimi' : 'DeepSeek';
+      _logError('$whoName ($model)', e.toString());
+      _showErrorDialog(whoName, e.toString(),
+          () => who == 'kimi' ? _callKimi() : _callDs());
     }
     if (mounted) setState(() => _loading = false);
   }
@@ -394,28 +518,89 @@ class _ChatScreenState extends State<ChatScreen> {
         otherInbox: _inboxKimi,
       );
 
-  void _retrySnack(String who, Object e) {
+  // ---------- Диалог ошибки ----------
+
+  void _showErrorDialog(String who, String error, VoidCallback onRetry) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('⚠️ $who: $e\nВопрос сохранён в очереди.'),
-      duration: const Duration(seconds: 8),
-      action: SnackBarAction(
-        label: 'Повторить',
-        onPressed: () => who == 'Kimi' ? _callKimi() : _callDs(),
+    final tc = TextEditingController(text: _maxTokens.toString());
+    String eff = _reasoningEffort;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('⚠️ Ошибка: $who'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SelectableText(error, style: const TextStyle(fontSize: 13)),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: tc,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                      labelText: 'Лимит токенов', isDense: true),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  value: _efforts.contains(eff) ? eff : _efforts.first,
+                  decoration: const InputDecoration(
+                      labelText: 'Глубина размышлений', isDense: true),
+                  items: _efforts
+                      .map((m) => DropdownMenuItem(value: m, child: Text(m)))
+                      .toList(),
+                  onChanged: (v) => setD(() => eff = v ?? eff),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: '$who: $error'));
+              },
+              child: const Text('Копировать'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Закрыть'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {
+                  _maxTokens = int.tryParse(tc.text) ?? _maxTokens;
+                  _reasoningEffort = eff;
+                });
+                _saveSettings();
+                Navigator.pop(ctx);
+                onRetry();
+              },
+              child: const Text('Повторить'),
+            ),
+          ],
+        ),
       ),
-    ));
+    );
   }
+
+  // ---------- Авто-диалог ----------
 
   Future<void> _auto() async {
     if (_autoLoop) {
-      setState(() => _autoLoop = false);
+      // Мягкая остановка: текущий запрос завершится, цикл встанет.
+      setState(() => _stopRequested = true);
       return;
     }
     if (_inboxKimi.isEmpty && _inboxDs.isEmpty) {
       _send('Начни диалог.', 'kimi');
     }
-    setState(() => _autoLoop = true);
-    while (_autoLoop && mounted) {
+    setState(() {
+      _autoLoop = true;
+      _stopRequested = false;
+      _awaitingComment = false;
+    });
+    while (_autoLoop && mounted && !_stopRequested) {
       if (_inboxKimi.isNotEmpty) {
         await _callKimi();
       } else if (_inboxDs.isNotEmpty) {
@@ -425,7 +610,22 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       await Future.delayed(const Duration(seconds: 2));
     }
-    if (mounted) setState(() => _autoLoop = false);
+    if (mounted) {
+      setState(() {
+        _autoLoop = false;
+        // Если остановили вручную и очереди не пусты — ждём комментарий.
+        _awaitingComment =
+            _stopRequested && (_inboxKimi.isNotEmpty || _inboxDs.isNotEmpty);
+      });
+    }
+  }
+
+  /// Продолжить цикл после остановки: комментарий уходит обеим моделям.
+  void _resumeWithComment() {
+    final c = _ctrl.text.trim();
+    setState(() => _awaitingComment = false);
+    if (c.isNotEmpty) _send(c, 'both');
+    _auto();
   }
 
   void _scrollBottom() {
@@ -446,6 +646,7 @@ class _ChatScreenState extends State<ChatScreen> {
     String km = _kimiModel;
     String dm = _dsModel;
     String eff = _reasoningEffort;
+    String strat = _keepStrategy;
     bool showThink = _showThinking;
     showDialog(
       context: context,
@@ -479,7 +680,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
                   value: _dsModels.contains(dm) ? dm : _dsModels.first,
-                  decoration: const InputDecoration(labelText: 'Модель DeepSeek'),
+                  decoration:
+                      const InputDecoration(labelText: 'Модель DeepSeek'),
                   items: _dsModels
                       .map((m) => DropdownMenuItem(value: m, child: Text(m)))
                       .toList(),
@@ -494,6 +696,22 @@ class _ChatScreenState extends State<ChatScreen> {
                       .map((m) => DropdownMenuItem(value: m, child: Text(m)))
                       .toList(),
                   onChanged: (v) => setD(() => eff = v ?? eff),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  value: _strategies.contains(strat) ? strat : 'smart',
+                  decoration:
+                      const InputDecoration(labelText: 'Стратегия истории'),
+                  items: const [
+                    DropdownMenuItem(
+                        value: 'smart',
+                        child: Text('smart — резюме + последние 10')),
+                    DropdownMenuItem(
+                        value: 'last20', child: Text('last20 — последние 20')),
+                    DropdownMenuItem(
+                        value: 'full', child: Text('full — вся (не рекоменд.)')),
+                  ],
+                  onChanged: (v) => setD(() => strat = v ?? strat),
                 ),
                 const SizedBox(height: 8),
                 TextField(
@@ -516,12 +734,16 @@ class _ChatScreenState extends State<ChatScreen> {
                   value: showThink,
                   onChanged: (v) => setD(() => showThink = v),
                 ),
+                const SizedBox(height: 8),
+                Text('Версия приложения: $_appVersion',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
               ],
             ),
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Отмена')),
             ElevatedButton(
               onPressed: () {
                 setState(() {
@@ -530,6 +752,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   _kimiModel = km;
                   _dsModel = dm;
                   _reasoningEffort = eff;
+                  _keepStrategy = strat;
                   _maxTokens = int.tryParse(mc.text) ?? _maxTokens;
                   _timeoutSec = int.tryParse(tc.text) ?? _timeoutSec;
                   _showThinking = showThink;
@@ -545,7 +768,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // ---------- Экран очередей ----------
+  // ---------- Экраны ----------
 
   void _openQueues() {
     Navigator.push(
@@ -560,6 +783,13 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  void _openErrorLog() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => ErrorLogScreen(log: _errorLog)),
+    );
+  }
+
   // ---------- UI ----------
 
   Color _color(String r) {
@@ -569,11 +799,19 @@ class _ChatScreenState extends State<ChatScreen> {
     return Colors.grey;
   }
 
-  String _label(String r) {
-    if (r == 'user') return '👤 Вы';
-    if (r == 'kimi') return '🔥 Kimi ($_kimiModel)';
-    if (r == 'ds') return '🧊 DeepSeek ($_dsModel)';
-    return '⚙️ Система';
+  String _label(Map<String, String> m) {
+    final r = m['role'] as String;
+    var base = switch (r) {
+      'user' => '👤 Вы',
+      'kimi' => '🔥 Kimi ($_kimiModel)',
+      'ds' => '🧊 DeepSeek ($_dsModel)',
+      _ => '⚙️ Система',
+    };
+    final step = m['step'];
+    final secs = m['secs'];
+    if (step != null) base += ' · шаг $step';
+    if (secs != null) base += ' · ${secs}с';
+    return base;
   }
 
   @override
@@ -583,7 +821,11 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: AppBar(
         title: const Text('🤖 Kimi ↔ DeepSeek', style: TextStyle(fontSize: 15)),
         actions: [
-          IconButton(icon: const Icon(Icons.settings), onPressed: _settingsDialog),
+          IconButton(
+              icon: const Icon(Icons.bug_report, size: 20),
+              onPressed: _openErrorLog),
+          IconButton(
+              icon: const Icon(Icons.settings), onPressed: _settingsDialog),
           InkWell(
             onTap: _openQueues,
             borderRadius: BorderRadius.circular(12),
@@ -656,10 +898,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 const SizedBox(width: 6),
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: _loading ? null : _auto,
+                    onPressed: _auto,
                     style: ElevatedButton.styleFrom(
-                        backgroundColor:
-                            _autoLoop ? Colors.red.shade700 : Colors.blue.shade700,
+                        backgroundColor: _autoLoop
+                            ? Colors.red.shade700
+                            : Colors.blue.shade700,
                         padding: const EdgeInsets.symmetric(vertical: 6)),
                     child: Text(_autoLoop ? '⏹ Стоп' : '⏩ Auto',
                         style: TextStyle(fontSize: fs)),
@@ -674,6 +917,28 @@ class _ChatScreenState extends State<ChatScreen> {
               padding: const EdgeInsets.symmetric(vertical: 2),
               child: Text(_status,
                   style: const TextStyle(fontSize: 12, color: Colors.amber)),
+            ),
+          if (_awaitingComment)
+            Container(
+              color: const Color(0xFF2D2404),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                        '⏸ Цикл остановлен. Напишите комментарий и продолжите:',
+                        style: TextStyle(fontSize: 12, color: Colors.amber)),
+                  ),
+                  ElevatedButton(
+                    onPressed: _resumeWithComment,
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue.shade700,
+                        padding: const EdgeInsets.symmetric(horizontal: 12)),
+                    child: const Text('▶ Продолжить',
+                        style: TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
             ),
           Expanded(
             child: ListView.builder(
@@ -699,7 +964,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(_label(r),
+                      Text(_label(m),
                           style: TextStyle(
                               fontSize: fs * 0.75,
                               color: Colors.grey.shade500,
@@ -729,23 +994,33 @@ class _ChatScreenState extends State<ChatScreen> {
                     controller: _ctrl,
                     style: TextStyle(fontSize: fs),
                     decoration: InputDecoration(
-                      hintText: 'To $_target...',
+                      hintText: _awaitingComment
+                          ? 'Комментарий к диалогу...'
+                          : 'To $_target...',
                       isDense: true,
                       contentPadding: const EdgeInsets.symmetric(
                           horizontal: 10, vertical: 8),
                       border: const OutlineInputBorder(),
                     ),
-                    onSubmitted: (t) => _send(t, _target),
+                    onSubmitted: (t) =>
+                        _awaitingComment ? _resumeWithComment() : _send(t, _target),
                   ),
                 ),
                 const SizedBox(width: 6),
                 IconButton(
-                  onPressed: () => _send(_ctrl.text, _target),
+                  onPressed: () => _awaitingComment
+                      ? _resumeWithComment()
+                      : _send(_ctrl.text, _target),
                   icon: const Icon(Icons.send, color: Color(0xFF58A6FF)),
                   iconSize: 22,
                 ),
               ],
             ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Text('v$_appVersion',
+                style: const TextStyle(fontSize: 10, color: Colors.grey)),
           ),
         ],
       ),
@@ -894,6 +1169,49 @@ class _QueueScreenState extends State<QueueScreen> {
           _section('Очередь DeepSeek', const Color(0xFFF0883E), widget.inboxDs),
         ],
       ),
+    );
+  }
+}
+
+/// Экран лога ошибок с копированием.
+class ErrorLogScreen extends StatelessWidget {
+  final List<String> log;
+  const ErrorLogScreen({super.key, required this.log});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('🐞 Лог ошибок (${log.length})'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.copy),
+            tooltip: 'Копировать всё',
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: log.join('\n')));
+              ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Лог скопирован')));
+            },
+          ),
+        ],
+      ),
+      body: log.isEmpty
+          ? const Center(
+              child: Text('Ошибок пока нет 🎉',
+                  style: TextStyle(color: Colors.grey)))
+          : ListView.builder(
+              padding: const EdgeInsets.all(8),
+              itemCount: log.length,
+              itemBuilder: (ctx, i) => Card(
+                color: const Color(0xFF1F2937),
+                margin: const EdgeInsets.only(bottom: 4),
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: SelectableText(log[log.length - 1 - i],
+                      style: const TextStyle(fontSize: 12)),
+                ),
+              ),
+            ),
     );
   }
 }
