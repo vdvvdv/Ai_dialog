@@ -39,6 +39,9 @@ jobs:
           sed -i -E "s/^version: ([0-9.]+)\+[0-9]+/version: \1+${{ github.run_number }}/" pubspec.yaml
           grep '^version:' pubspec.yaml
 
+      - name: Sanitize dart sources
+        run: sed -i 's/\\\\;/;/g' lib/main.dart
+
       - name: flutter pub get
         run: flutter pub get
 

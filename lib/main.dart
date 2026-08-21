@@ -41,8 +41,8 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  static const _kimiUrl = 'https://api.moonshot.ai/v1/chat/completions'\;
-  static const _dsUrl = 'https://api.deepseek.com/v1/chat/completions'\;
+  static const _kimiUrl = 'https://api.moonshot.ai/v1/chat/completions';
+  static const _dsUrl = 'https://api.deepseek.com/v1/chat/completions';
 
   static const _kimiModels = [
     'kimi-k2.6',
