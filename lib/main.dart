@@ -444,8 +444,6 @@ class _ChatScreenState extends State<ChatScreen> {
     final mc = TextEditingController(text: _maxTokens.toString());
     final tc = TextEditingController(text: _timeoutSec.toString());
     String km = _kimiModel;
-    String dm = TextEditingController(text: _timeoutSec.toString());
-    String km = _kimiModel;
     String dm = _dsModel;
     String eff = _reasoningEffort;
     bool showThink = _showThinking;
