@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -41,13 +42,13 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  static const _kimiUrl = 'https://api.moonshot.ai/v1/chat/completions';
-  static const _dsUrl = 'https://api.deepseek.com/v1/chat/completions';
+  static const _kimiUrl = 'https://api.moonshot.ai/v1/chat/completions'\;
+  static const _dsUrl = 'https://api.deepseek.com/v1/chat/completions'\;
 
   static const _kimiModels = [
+    'kimi-k2-0905-preview',
     'kimi-k2.6',
     'kimi-k2.5',
-    'kimi-k2-0905-preview',
     'moonshot-v1-8k',
     'moonshot-v1-32k',
     'moonshot-v1-128k',
@@ -69,7 +70,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String _status = '';
   String _kimiKey = '';
   String _dsKey = '';
-  String _kimiModel = 'kimi-k2.6';
+  String _kimiModel = 'kimi-k2-0905-preview';
   String _dsModel = 'deepseek-chat';
   int _maxTokens = 4000;
   int _timeoutSec = 180;
@@ -124,8 +125,6 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollBottom();
   }
 
-  /// Формирует messages из истории. Текст из очереди уже есть в истории,
-  /// поэтому отдельно дублировать его не нужно.
   List<Map<String, String>> _buildMsgs(String who) {
     final msgs = <Map<String, String>>[];
     msgs.add({
@@ -136,8 +135,11 @@ class _ChatScreenState extends State<ChatScreen> {
     });
     for (final h in _history) {
       final r = h['role'] as String;
-      final c = h['content'] as String;
+      var c = h['content'] as String;
       if (c.trim().isEmpty || c == '…' || c.startsWith('💭')) continue;
+      // Убираем служебную пометку об обрыве из контекста.
+      const marker = '\n\n⚠️ (соединение оборвалось — ответ неполный)';
+      if (c.endsWith(marker)) c = c.substring(0, c.length - marker.length);
       if (r == 'user') {
         msgs.add({'role': 'user', 'content': c});
       } else if (r == 'kimi' && who == 'kimi') {
@@ -153,54 +155,57 @@ class _ChatScreenState extends State<ChatScreen> {
     return msgs;
   }
 
-  // ---------- Потоковый запрос с авто-повтором ----------
+  // ---------- Потоковый запрос ----------
 
-  /// Одиночная попытка запроса. Учитывает и content, и reasoning_content
-  /// («думающие» модели: kimi-k2.6, deepseek-reasoner).
+  /// Один запрос — один проход по потоку.
+  /// Если соединение оборвалось ПОСЛЕ того, как пришли данные, —
+  /// возвращает частичный ответ с пометкой, а НЕ бросает ошибку.
+  /// Бросает ошибку только если не получено ничего.
   Future<String> _apiOnce(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk) async {
-    final client = HttpClient();
-    client.badCertificateCallback = (cert, host, port) => true;
-    client.connectionTimeout = const Duration(seconds: 30);
-
+    final client = http.Client();
     String finishReason = '';
     String usage = '';
-    final buf = StringBuffer();       // финальный ответ (content)
-    final thinkBuf = StringBuffer();  // размышления (reasoning_content)
+    final buf = StringBuffer();      // финальный ответ (content)
+    final thinkBuf = StringBuffer(); // размышления (reasoning_content)
+    var broken = false;              // поток оборвался на середине
+
     try {
-      final request = await client.postUrl(Uri.parse(url));
-      request.headers.set('Authorization', 'Bearer $key');
-      request.headers.set('Content-Type', 'application/json; charset=utf-8');
-      request.write(jsonEncode({
+      final request = http.Request('POST', Uri.parse(url));
+      request.headers['Authorization'] = 'Bearer $key';
+      request.headers['Content-Type'] = 'application/json; charset=utf-8';
+      request.headers['Accept'] = 'text/event-stream';
+      request.headers['Cache-Control'] = 'no-cache';
+      request.body = jsonEncode({
         'model': model,
         'messages': msgs,
         'max_tokens': _maxTokens,
         'stream': true,
-      }));
+      });
 
-      final response = await request.close();
+      final response = await client.send(request)
+          .timeout(const Duration(seconds: 60)); // таймаут на УСТАНОВКУ
+
       if (response.statusCode != 200) {
-        final errBody = await response.transform(utf8.decoder).join();
+        final errBody = await response.stream.bytesToString();
         final short =
             errBody.length > 300 ? '${errBody.substring(0, 300)}…' : errBody;
         throw 'HTTP ${response.statusCode}: $short';
       }
 
-      // Таймаут применяется к паузе МЕЖДУ порциями потока, а не ко всему ответу.
-      final stream = response
+      // Таймаут применяется к паузе МЕЖДУ порциями потока.
+      final lines = response.stream
           .transform(utf8.decoder)
+          .transform(const LineSplitter())
           .timeout(Duration(seconds: _timeoutSec));
 
-      var lineBuf = '';
-      await for (final chunk in stream) {
-        lineBuf += chunk;
-        int nl;
-        while ((nl = lineBuf.indexOf('\n')) >= 0) {
-          final line = lineBuf.substring(0, nl).trim();
-          lineBuf = lineBuf.substring(nl + 1);
+      try {
+        await for (final rawLine in lines) {
+          final line = rawLine.trim();
           if (!line.startsWith('data:')) continue;
           final data = line.substring(5).trim();
-          if (data == '[DONE]' || data.isEmpty) continue;
+          if (data.isEmpty) continue;
+          if (data == '[DONE]') break;
           try {
             final j = jsonDecode(data);
             final choice = j['choices']?[0];
@@ -213,12 +218,12 @@ class _ChatScreenState extends State<ChatScreen> {
               final c = delta['content'];
               if (rc != null) thinkBuf.write(rc);
               if (c != null) buf.write(c);
-              // Отображение: ответ; пока его нет — ход размышлений.
               if (buf.isNotEmpty) {
                 onChunk(buf.toString());
               } else if (thinkBuf.isNotEmpty && _showThinking) {
                 final t = thinkBuf.toString();
-                final tail = t.length > 500 ? '…${t.substring(t.length - 500)}' : t;
+                final tail =
+                    t.length > 500 ? '…${t.substring(t.length - 500)}' : t;
                 onChunk('💭 $tail');
               }
             }
@@ -226,21 +231,35 @@ class _ChatScreenState extends State<ChatScreen> {
             // неполная строка JSON — пропускаем
           }
         }
+      } catch (e) {
+        // Обрыв посреди потока (Connection closed, TimeoutException и т.п.)
+        if (buf.isNotEmpty || thinkBuf.isNotEmpty) {
+          broken = true; // данные есть — работаем с частичным ответом
+        } else {
+          rethrow; // не получено ничего — это ошибка, можно retry
+        }
       }
     } finally {
       client.close();
     }
 
-    final result = buf.toString();
+    var result = buf.toString();
+
     if (result.trim().isEmpty) {
       final thought = thinkBuf.length;
+      if (broken && thought > 0) {
+        throw 'Обрыв во время размышлений ($thought симв.), ответ не начался. '
+            'Попробуйте модель без размышлений (kimi-k2-0905-preview) или повторите.';
+      }
       throw 'Пустой ответ (finish_reason: ${finishReason.isEmpty ? "нет" : finishReason}'
           '${thought > 0 ? ", размышлений: $thought симв. — возможно, max_tokens=$_maxTokens ушёл на них; увеличьте лимит" : ""}'
           '${usage.isEmpty ? "" : ", usage: $usage"})';
     }
-    if (finishReason == 'length') {
-      throw 'Ответ обрезан по max_tokens=$_maxTokens '
-          '(увеличьте лимит в настройках). Получено: ${result.length} симв.';
+
+    if (broken) {
+      result += '\n\n⚠️ (соединение оборвалось — ответ неполный)';
+    } else if (finishReason == 'length') {
+      result += '\n\n⚠️ (ответ обрезан по max_tokens=$_maxTokens — увеличьте лимит в настройках)';
     }
     return result;
   }
@@ -252,10 +271,11 @@ class _ChatScreenState extends State<ChatScreen> {
     return 0;
   }
 
-  /// Запрос с автоматическим повтором при 429 / 5xx / сетевых сбоях.
+  /// Retry ТОЛЬКО если не получено ни байта (429, 5xx, мгновенный обрыв).
+  /// Частичные ответы не перезапрашиваются.
   Future<String> _apiStream(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk) async {
-    const maxAttempts = 6;
+    const maxAttempts = 4;
     var attempt = 0;
     while (true) {
       attempt++;
@@ -263,20 +283,20 @@ class _ChatScreenState extends State<ChatScreen> {
         return await _apiOnce(url, key, model, msgs, onChunk);
       } catch (e) {
         final err = e.toString();
-        // Не повторяем ошибки авторизации/запроса — их retry не вылечит.
         final noRetry = err.startsWith('HTTP 400') ||
             err.startsWith('HTTP 401') ||
             err.startsWith('HTTP 403') ||
             err.startsWith('HTTP 404') ||
-            err.startsWith('Ответ обрезан');
+            err.startsWith('Пустой ответ') ||
+            err.startsWith('Обрыв во время размышлений');
         if (noRetry || attempt >= maxAttempts) rethrow;
 
         var wait = _retryAfterSec(err);
-        if (wait <= 0) wait = 2 * attempt; // нарастающая пауза: 2,4,6...
+        if (wait <= 0) wait = 2 * attempt;
         if (wait > 30) wait = 30;
         if (mounted) {
           setState(() => _status =
-              '⏳ Лимит API, повтор $attempt/$maxAttempts через ${wait}с…');
+              '⏳ Сбой без данных, повтор $attempt/$maxAttempts через ${wait}с…');
         }
         await Future.delayed(Duration(seconds: wait));
         if (mounted) setState(() => _status = '');
@@ -287,7 +307,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // ---------- Вызовы моделей ----------
 
   Future<void> _callModel({
-    required String who, // 'kimi' | 'ds'
+    required String who,
     required String url,
     required String key,
     required String model,
@@ -305,7 +325,6 @@ class _ChatScreenState extends State<ChatScreen> {
           }));
       return;
     }
-    // Вопрос НЕ удаляется из очереди до успешного ответа.
     final msgs = _buildMsgs(who);
     setState(() {
       _loading = true;
@@ -318,14 +337,14 @@ class _ChatScreenState extends State<ChatScreen> {
         if (mounted) setState(() => _history[idx]['content'] = partial);
       });
       setState(() {
-        inbox.removeAt(0); // успех — теперь удаляем
+        inbox.removeAt(0);
         _history[idx]['content'] = r;
         otherInbox.add(r);
       });
       _scrollBottom();
     } catch (e) {
       setState(() {
-        _history.removeAt(idx); // убираем пустышку, вопрос остался в очереди
+        _history.removeAt(idx);
         _autoLoop = false;
       });
       _retrySnack(who == 'kimi' ? 'Kimi' : 'DeepSeek', e);
@@ -363,10 +382,9 @@ class _ChatScreenState extends State<ChatScreen> {
     ));
   }
 
-  /// Непрерывный авто-диалог, пока есть сообщения в очередях.
   Future<void> _auto() async {
     if (_autoLoop) {
-      setState(() => _autoLoop = false); // повторное нажатие — стоп
+      setState(() => _autoLoop = false);
       return;
     }
     if (_inboxKimi.isEmpty && _inboxDs.isEmpty) {
@@ -381,7 +399,6 @@ class _ChatScreenState extends State<ChatScreen> {
       } else {
         break;
       }
-      // Пауза между ходами — бережём лимит параллельности API.
       await Future.delayed(const Duration(seconds: 2));
     }
     if (mounted) setState(() => _autoLoop = false);
@@ -839,7 +856,8 @@ class _QueueScreenState extends State<QueueScreen> {
           _section('Очередь Kimi', const Color(0xFF58A6FF), widget.inboxKimi),
           const Divider(),
           _section('Очередь DeepSeek', const Color(0xFFF0883E), widget.inboxDs),
-        ],      ),
+        ],
+      ),
     );
   }
 }

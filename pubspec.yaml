@@ -2,9 +2,8 @@ name: ai_dialog
 description: "Ai dialog: Kimi <-> DeepSeek"
 publish_to: 'none'
 
-# versionCode (число после '+') автоматически подменяется
-# номером сборки в GitHub Actions — вручную не трогайте.
-version: 1.0.1+1
+# versionCode и номер версии подменяются автоматически в GitHub Actions.
+version: 1.0.0+1
 
 environment:
   sdk: ^3.5.0
@@ -13,6 +12,7 @@ dependencies:
   flutter:
     sdk: flutter
   shared_preferences: ^2.3.0
+  http: ^1.2.0
 
 dev_dependencies:
   flutter_test:
