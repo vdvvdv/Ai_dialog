@@ -170,6 +170,8 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_errorLog.length > 100) _errorLog.removeAt(0);
   }
 
+  String _now() => DateTime.now().toString().substring(11, 19);
+
   int _estTokens(List<Map<String, String>> msgs) {
     var chars = 0;
     for (final m in msgs) {
@@ -191,7 +193,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _send(String text, String target) {
     if (text.trim().isEmpty) return;
     setState(() {
-      _history.add({'role': 'user', 'content': text});
+      _history.add({'role': 'user', 'content': text, 'time': _now()});
       if (target == 'kimi') {
         _inboxKimi.add(text);
       } else if (target == 'ds') {
@@ -538,7 +540,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _loading = true;
       _status = '';
-      _history.add({'role': who, 'content': '…', 'step': '$step'});
+      _history.add({'role': who, 'content': '…', 'time': _now(), 'step': '$step'});
     });
     final idx = _history.length - 1;
     _scrollBottom();
@@ -882,6 +884,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final secs = m['secs'];
     if (step != null) base += ' · шаг $step';
     if (secs != null) base += ' · ${secs}с';
+    final tm = m['time'];
+    if (tm != null) base += ' · $tm';
     return base;
   }
 
