@@ -43,8 +43,10 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  static const _kimiUrl = 'https://api.moonshot.ai/v1/chat/completions';
-  static const _dsUrl = 'https://api.deepseek.com/v1/chat/completions';
+  static const _kimiBase = 'https://api.moonshot.ai/v1';
+  static const _dsBase = 'https://api.deepseek.com/v1';
+  static const _kimiUrl = '$_kimiBase/chat/completions';
+  static const _dsUrl = '$_dsBase/chat/completions';
   static const _appVersion =
       String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
 
@@ -59,6 +61,8 @@ class _ChatScreenState extends State<ChatScreen> {
     'moonshot-v1-128k',
   ];
   static const _dsModels = [
+    'deepseek-v4-flash',
+    'deepseek-v4-pro',
     'deepseek-chat',
     'deepseek-reasoner',
   ];
@@ -71,6 +75,10 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<String> _errorLog = [];
   final TextEditingController _ctrl = TextEditingController();
   final ScrollController _scroll = ScrollController();
+
+  List<Map<String, dynamic>> _kimiInfo = [];
+  List<Map<String, dynamic>> _dsInfo = [];
+  String _modelsSrc = 'встроенный список';
 
   bool _loading = false;
   bool _autoLoop = false;
@@ -179,7 +187,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _logError(String who, String err) => _logLine('ERR $who: $err');
 
-  /// Структурированная запись о запросе (JSON в одну строку).
   void _logReq(Map<String, dynamic> m) => _logLine(jsonEncode(m));
 
   String _now() => DateTime.now().toString().substring(11, 19);
@@ -196,8 +203,125 @@ class _ChatScreenState extends State<ChatScreen> {
     if (model.contains('128k')) return 128000;
     if (model.contains('32k')) return 32000;
     if (model.contains('8k')) return 8192;
-    if (model.startsWith('deepseek')) return 64000;
+    if (model.startsWith('deepseek')) return 1000000;
     return 131072;
+  }
+
+  // ---------- Список моделей с сервера ----------
+
+  /// Встроенная таблица характеристик (фолбэк, если API не отдал поля).
+  Map<String, dynamic> _modelMeta(String id) {
+    var ctx = 131072;
+    if (id.contains('128k')) ctx = 128000;
+    if (id.contains('32k') && !id.contains('k2')) ctx = 32000;
+    if (id.contains('8k')) ctx = 8192;
+    if (id.startsWith('deepseek')) ctx = 1000000;
+    final reasoning = id.startsWith('kimi-k3') ||
+        id.startsWith('kimi-k2.6') ||
+        id.startsWith('kimi-k2.7') ||
+        id.contains('thinking') ||
+        id.contains('reasoner');
+    final vision = id.contains('vision') ||
+        id.contains('k2.5') ||
+        id == 'kimi-latest';
+    return {'ctx': ctx, 'reasoning': reasoning, 'vision': vision};
+  }
+
+  String _metaStr(int ctx, bool reasoning, bool vision) {
+    final c = ctx >= 1000000
+        ? '${(ctx / 1000000).toStringAsFixed(0)}M'
+        : '${(ctx / 1000).toStringAsFixed(0)}K';
+    return '$c контекст${reasoning ? ' · 🧠 reasoning' : ''}'
+        '${vision ? ' · 👁 мультимод.' : ''}';
+  }
+
+  Future<void> _fetchModelsLists() async {
+    Future<List<Map<String, dynamic>>> one(String base, String key) async {
+      final r = await http.get(Uri.parse('$base/models'), headers: {
+        'Authorization': 'Bearer $key',
+        'Accept-Encoding': 'gzip',
+      }).timeout(const Duration(seconds: 8));
+      if (r.statusCode != 200) throw 'HTTP ${r.statusCode}';
+      final d = jsonDecode(utf8.decode(r.bodyBytes));
+      final out = <Map<String, dynamic>>[];
+      for (final m in (d['data'] as List)) {
+        final id = m['id'].toString();
+        final meta = _modelMeta(id);
+        out.add({
+          'id': id,
+          'ctx': m['context_length'] ??
+              m['max_context_length'] ??
+              meta['ctx'],
+          'reasoning':
+              m['supports_reasoning'] ?? m['reasoning'] ?? meta['reasoning'],
+          'vision': m['supports_vision'] ?? m['vision'] ?? meta['vision'],
+        });
+      }
+      out.sort((a, b) => (a['id'] as String).compareTo(b['id'] as String));
+      return out;
+    }
+
+    var got = 0;
+    if (_kimiKey.isNotEmpty) {
+      try {
+        _kimiInfo = await one(_kimiBase, _kimiKey);
+        got++;
+      } catch (e) {
+        _logError('models-kimi', e.toString());
+      }
+    }
+    if (_dsKey.isNotEmpty) {
+      try {
+        _dsInfo = await one(_dsBase, _dsKey);
+        got++;
+      } catch (e) {
+        _logError('models-ds', e.toString());
+      }
+    }
+    _modelsSrc = got > 0 ? 'с сервера' : 'встроенный список';
+  }
+
+  Widget _modelDropdown(String label, String value,
+      List<Map<String, dynamic>> info, List<String> fallback,
+      void Function(String) onChanged) {
+    final ids = info.isNotEmpty
+        ? info.map((e) => e['id'] as String).toList()
+        : List<String>.from(fallback);
+    if (!ids.contains(value)) ids.insert(0, value);
+    String sub(String id) {
+      final e = info.firstWhere((x) => x['id'] == id,
+          orElse: () => <String, dynamic>{});
+      if (e.isNotEmpty) {
+        return _metaStr(
+            (e['ctx'] as num).toInt(), e['reasoning'] == true, e['vision'] == true);
+      }
+      final m = _modelMeta(id);
+      return _metaStr(m['ctx'], m['reasoning'], m['vision']);
+    }
+
+    return DropdownButtonFormField<String>(
+      isExpanded: true,
+      value: value,
+      decoration: InputDecoration(labelText: label, isDense: true),
+      items: ids
+          .map((id) => DropdownMenuItem(
+                value: id,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(id, style: const TextStyle(fontSize: 14)),
+                    Text(sub(id),
+                        style:
+                            const TextStyle(fontSize: 10, color: Colors.grey)),
+                  ],
+                ),
+              ))
+          .toList(),
+      onChanged: (v) {
+        if (v != null) onChanged(v);
+      },
+    );
   }
 
   // ---------- Отправка ----------
@@ -239,6 +363,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 _step = 0;
                 _status = '';
               });
+              _logLine('🗑 Очистка: история, очереди, резюме стёрты');
               _persistState();
               Navigator.pop(ctx);
             },
@@ -622,7 +747,7 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       sw.stop();
       setState(() {
-        _history.removeAt(idx);
+        if (idx < _history.length) _history.removeAt(idx);
         _autoLoop = false;
       });
       _persistState();
@@ -768,7 +893,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // ---------- Настройки ----------
 
-  void _settingsDialog() {
+  Future<void> _settingsDialog() async {
+    setState(() => _status = '📡 Запрашиваю список моделей…');
+    await _fetchModelsLists();
+    if (mounted) setState(() => _status = '');
+    if (!mounted) return;
+
     final kc = TextEditingController(text: _kimiKey);
     final dc = TextEditingController(text: _dsKey);
     final mc = TextEditingController(text: _maxTokens.toString());
@@ -799,23 +929,16 @@ class _ChatScreenState extends State<ChatScreen> {
                   obscureText: true,
                 ),
                 const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  value: _kimiModels.contains(km) ? km : _kimiModels.first,
-                  decoration: const InputDecoration(labelText: 'Модель Kimi'),
-                  items: _kimiModels
-                      .map((m) => DropdownMenuItem(value: m, child: Text(m)))
-                      .toList(),
-                  onChanged: (v) => setD(() => km = v ?? km),
-                ),
+                _modelDropdown('Модель Kimi', km, _kimiInfo, _kimiModels,
+                    (v) => setD(() => km = v)),
                 const SizedBox(height: 8),
-                DropdownButtonFormField<String>(
-                  value: _dsModels.contains(dm) ? dm : _dsModels.first,
-                  decoration:
-                      const InputDecoration(labelText: 'Модель DeepSeek'),
-                  items: _dsModels
-                      .map((m) => DropdownMenuItem(value: m, child: Text(m)))
-                      .toList(),
-                  onChanged: (v) => setD(() => dm = v ?? dm),
+                _modelDropdown('Модель DeepSeek', dm, _dsInfo, _dsModels,
+                    (v) => setD(() => dm = v)),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Список моделей: $_modelsSrc',
+                      style:
+                          const TextStyle(fontSize: 10, color: Colors.grey)),
                 ),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
