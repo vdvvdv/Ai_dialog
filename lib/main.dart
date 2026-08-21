@@ -303,6 +303,11 @@ class _ChatScreenState extends State<ChatScreen> {
       isExpanded: true,
       value: value,
       decoration: InputDecoration(labelText: label, isDense: true),
+      selectedItemBuilder: (ctx) => ids
+          .map((id) => Text(id,
+              style: const TextStyle(fontSize: 14),
+              overflow: TextOverflow.ellipsis))
+          .toList(),
       items: ids
           .map((id) => DropdownMenuItem(
                 value: id,
