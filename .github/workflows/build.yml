@@ -48,11 +48,27 @@ jobs:
       - name: Analyze (non-blocking)
         run: flutter analyze --no-fatal-infos --no-fatal-warnings || true
 
-      - name: Build arm64 APK (release)
+      - name: Build arm64 APK (release, unsigned-by-us)
         run: |
           flutter build apk --release --target-platform android-arm64 \
             --obfuscate --split-debug-info=./debug_info \
             --dart-define=APP_VERSION=1.0.${{ github.run_number }}
+
+      - name: Sign APK with persistent keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KS_PASSWORD: ${{ secrets.KS_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > /tmp/upload.keystore
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          "$ANDROID_HOME/build-tools/$BT/apksigner" sign \
+            --ks /tmp/upload.keystore \
+            --ks-key-alias upload \
+            --ks-pass pass:"$KS_PASSWORD" \
+            --key-pass pass:"$KS_PASSWORD" \
+            --out build/app/outputs/flutter-apk/app-release.apk \
+            build/app/outputs/flutter-apk/app-release.apk
+          rm /tmp/upload.keystore
 
       - uses: actions/upload-artifact@v4
         with:
