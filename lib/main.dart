@@ -434,6 +434,7 @@ class _ChatScreenState extends State<ChatScreen> {
           if (data == '[DONE]') break;
           try {
             final j = jsonDecode(data);
+            if (j['model'] != null) metrics['srv_model'] = j['model'];
             if (j['usage'] != null) {
               usage = Map<String, dynamic>.from(j['usage']);
             }
@@ -531,7 +532,7 @@ class _ChatScreenState extends State<ChatScreen> {
     const maxAttempts = 4;
     final id = ++_reqSeq;
     var attempt = 0;
-    final metrics = <String, dynamic>{'id': id, 'model': model};
+    final metrics = <String, dynamic>{'id': id, 'model': model, 'url': url};
     while (true) {
       attempt++;
       try {
