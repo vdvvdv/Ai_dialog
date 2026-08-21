@@ -392,6 +392,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (isKimi) {
         body['max_completion_tokens'] = _maxTokens;
         final thinkingModel = model.startsWith('kimi-k3') ||
+            model.startsWith('kimi-k2.7') ||
             model.startsWith('kimi-k2.6') ||
             model.contains('thinking');
         if (_reasoningEffort != 'default' && thinkingModel) {
