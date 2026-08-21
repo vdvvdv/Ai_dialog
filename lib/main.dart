@@ -108,6 +108,47 @@ class _ChatScreenState extends State<ChatScreen> {
       _timeoutSec = p.getInt('timeout_sec') ?? _timeoutSec;
       _showThinking = p.getBool('show_thinking') ?? _showThinking;
     });
+    _restoreState(p);
+  }
+
+  /// Восстановление истории/очередей после перезапуска (Android убил процесс).
+  void _restoreState(SharedPreferences p) {
+    try {
+      final raw = p.getString('state');
+      if (raw == null || raw.isEmpty) return;
+      final d = jsonDecode(raw);
+      setState(() {
+        for (final m in (d['history'] as List)) {
+          _history.add(Map<String, String>.from(m));
+        }
+        _inboxKimi.addAll(List<String>.from(d['kimi'] ?? []));
+        _inboxDs.addAll(List<String>.from(d['ds'] ?? []));
+        _step = d['step'] ?? 0;
+        _historySummary = d['summary'] ?? '';
+      });
+      if (_history.isNotEmpty) {
+        setState(() => _status =
+            '♻️ Состояние восстановлено (шаг $_step, очереди K:${_inboxKimi.length} D:${_inboxDs.length})');
+      }
+    } catch (e) {
+      _logError('restore', e.toString());
+    }
+  }
+
+  /// Сохранение состояния при каждом изменении.
+  Future<void> _persistState() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(
+          'state',
+          jsonEncode({
+            'history': _history,
+            'kimi': _inboxKimi,
+            'ds': _inboxDs,
+            'step': _step,
+            'summary': _historySummary,
+          }));
+    } catch (_) {}
   }
 
   Future<void> _saveSettings() async {
@@ -123,15 +164,12 @@ class _ChatScreenState extends State<ChatScreen> {
     await p.setBool('show_thinking', _showThinking);
   }
 
-  // ---------- Утилиты ----------
-
   void _logError(String who, String err) {
     final t = DateTime.now().toString().substring(11, 19);
     _errorLog.add('[$t] $who: $err');
     if (_errorLog.length > 100) _errorLog.removeAt(0);
   }
 
-  /// Приблизительная оценка токенов (рус+англ ~3 симв/токен).
   int _estTokens(List<Map<String, String>> msgs) {
     var chars = 0;
     for (final m in msgs) {
@@ -140,13 +178,12 @@ class _ChatScreenState extends State<ChatScreen> {
     return chars ~/ 3;
   }
 
-  /// Контекстное окно модели (динамической справки у API нет — таблица).
   int _contextLimit(String model) {
     if (model.contains('128k')) return 128000;
     if (model.contains('32k')) return 32000;
     if (model.contains('8k')) return 8192;
     if (model.startsWith('deepseek')) return 64000;
-    return 131072; // kimi-k2 / k3 семейство
+    return 131072;
   }
 
   // ---------- Отправка ----------
@@ -165,10 +202,39 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
     _ctrl.clear();
+    _persistState();
     _scrollBottom();
   }
 
-  /// Формирует messages с учётом стратегии истории.
+  void _clearAll() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('🗑 Очистить всё?'),
+        content: const Text('История, очереди и резюме будут удалены.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          ElevatedButton(
+            onPressed: () {
+              setState(() {
+                _history.clear();
+                _inboxKimi.clear();
+                _inboxDs.clear();
+                _historySummary = '';
+                _step = 0;
+                _status = '';
+              });
+              _persistState();
+              Navigator.pop(ctx);
+            },
+            child: const Text('Очистить'),
+          ),
+        ],
+      ),
+    );
+  }
+
   List<Map<String, String>> _buildMsgs(String who) {
     final msgs = <Map<String, String>>[];
     msgs.add({
@@ -211,14 +277,14 @@ class _ChatScreenState extends State<ChatScreen> {
         }
         msgs.addAll(conv.length > 10 ? conv.sublist(conv.length - 10) : conv);
         break;
-      default: // full
+      default:
         msgs.addAll(conv);
     }
     return msgs;
   }
 
-  /// Авто-сжатие истории при приближении к лимиту контекста (>90%).
-  Future<void> _compressIfNeeded(String who, List<Map<String, String>> msgs) async {
+  Future<void> _compressIfNeeded(
+      String who, List<Map<String, String>> msgs) async {
     final model = who == 'kimi' ? _kimiModel : _dsModel;
     final limit = _contextLimit(model);
     final est = _estTokens(msgs);
@@ -266,11 +332,14 @@ class _ChatScreenState extends State<ChatScreen> {
             _status = '';
           });
           _saveSettings();
+          _persistState();
         }
       }
     } catch (e) {
       _logError('compress', e.toString());
-      if (mounted) setState(() => _status = '⚠️ Сжатие не удалось, продолжаю как есть');
+      if (mounted) {
+        setState(() => _status = '⚠️ Сжатие не удалось, продолжаю как есть');
+      }
     }
   }
 
@@ -407,7 +476,6 @@ class _ChatScreenState extends State<ChatScreen> {
     return 0;
   }
 
-  /// Retry ТОЛЬКО если не получено ни байта.
   Future<String> _apiStream(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk) async {
     const maxAttempts = 4;
@@ -463,7 +531,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     final msgs = _buildMsgs(who);
     await _compressIfNeeded(who, msgs);
-    final finalMsgs = _buildMsgs(who); // пересборка после возможного сжатия
+    final finalMsgs = _buildMsgs(who);
 
     final step = ++_step;
     final sw = Stopwatch()..start();
@@ -485,6 +553,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _history[idx]['secs'] = '${sw.elapsed.inSeconds}';
         otherInbox.add(r);
       });
+      _persistState();
       _scrollBottom();
     } catch (e) {
       sw.stop();
@@ -492,10 +561,11 @@ class _ChatScreenState extends State<ChatScreen> {
         _history.removeAt(idx);
         _autoLoop = false;
       });
+      _persistState();
       final whoName = who == 'kimi' ? 'Kimi' : 'DeepSeek';
       _logError('$whoName ($model)', e.toString());
-      _showErrorDialog(whoName, e.toString(),
-          () => who == 'kimi' ? _callKimi() : _callDs());
+      _showErrorDialog(
+          whoName, e.toString(), () => who == 'kimi' ? _callKimi() : _callDs());
     }
     if (mounted) setState(() => _loading = false);
   }
@@ -588,7 +658,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _auto() async {
     if (_autoLoop) {
-      // Мягкая остановка: текущий запрос завершится, цикл встанет.
       setState(() => _stopRequested = true);
       return;
     }
@@ -613,14 +682,12 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mounted) {
       setState(() {
         _autoLoop = false;
-        // Если остановили вручную и очереди не пусты — ждём комментарий.
         _awaitingComment =
             _stopRequested && (_inboxKimi.isNotEmpty || _inboxDs.isNotEmpty);
       });
     }
   }
 
-  /// Продолжить цикл после остановки: комментарий уходит обеим моделям.
   void _resumeWithComment() {
     final c = _ctrl.text.trim();
     setState(() => _awaitingComment = false);
@@ -709,7 +776,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     DropdownMenuItem(
                         value: 'last20', child: Text('last20 — последние 20')),
                     DropdownMenuItem(
-                        value: 'full', child: Text('full — вся (не рекоменд.)')),
+                        value: 'full',
+                        child: Text('full — вся (не рекоменд.)')),
                   ],
                   onChanged: (v) => setD(() => strat = v ?? strat),
                 ),
@@ -717,8 +785,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 TextField(
                   controller: mc,
                   keyboardType: TextInputType.number,
-                  decoration:
-                      const InputDecoration(labelText: 'Лимит токенов ответа'),
+                  decoration: const InputDecoration(
+                      labelText: 'Лимит токенов ответа'),
                 ),
                 const SizedBox(height: 8),
                 TextField(
@@ -777,7 +845,10 @@ class _ChatScreenState extends State<ChatScreen> {
         builder: (_) => QueueScreen(
           inboxKimi: _inboxKimi,
           inboxDs: _inboxDs,
-          onChanged: () => setState(() {}),
+          onChanged: () {
+            setState(() {});
+            _persistState();
+          },
         ),
       ),
     );
@@ -821,6 +892,10 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: AppBar(
         title: const Text('🤖 Kimi ↔ DeepSeek', style: TextStyle(fontSize: 15)),
         actions: [
+          IconButton(
+              icon: const Icon(Icons.delete_outline, size: 20),
+              tooltip: 'Очистить всё',
+              onPressed: _clearAll),
           IconButton(
               icon: const Icon(Icons.bug_report, size: 20),
               onPressed: _openErrorLog),
@@ -1002,8 +1077,9 @@ class _ChatScreenState extends State<ChatScreen> {
                           horizontal: 10, vertical: 8),
                       border: const OutlineInputBorder(),
                     ),
-                    onSubmitted: (t) =>
-                        _awaitingComment ? _resumeWithComment() : _send(t, _target),
+                    onSubmitted: (t) => _awaitingComment
+                        ? _resumeWithComment()
+                        : _send(t, _target),
                   ),
                 ),
                 const SizedBox(width: 6),
