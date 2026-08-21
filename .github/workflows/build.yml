@@ -48,7 +48,7 @@ jobs:
       - name: Analyze (non-blocking)
         run: flutter analyze --no-fatal-infos --no-fatal-warnings || true
 
-      - name: Build arm64 APK (release, unsigned-by-us)
+      - name: Build arm64 APK (release)
         run: |
           flutter build apk --release --target-platform android-arm64 \
             --obfuscate --split-debug-info=./debug_info \
@@ -59,18 +59,26 @@ jobs:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
           KS_PASSWORD: ${{ secrets.KS_PASSWORD }}
         run: |
+          set -e
           echo "$KEYSTORE_B64" | base64 -d > /tmp/upload.keystore
           BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          # Снимаем подпись Flutter, чтобы apksigner подписал начисто
+          cp build/app/outputs/flutter-apk/app-release.apk /tmp/unsigned.apk
+          zip -d /tmp/unsigned.apk 'META-INF/*' || true
+          "$ANDROID_HOME/build-tools/$BT/zipalign" -f -p 4 \
+            /tmp/unsigned.apk /tmp/aligned.apk
           "$ANDROID_HOME/build-tools/$BT/apksigner" sign \
             --ks /tmp/upload.keystore \
             --ks-key-alias upload \
             --ks-pass pass:"$KS_PASSWORD" \
             --key-pass pass:"$KS_PASSWORD" \
-            --out build/app/outputs/flutter-apk/app-release.apk \
-            build/app/outputs/flutter-apk/app-release.apk
-          rm /tmp/upload.keystore
+            --out build/app/outputs/flutter-apk/app-release-signed.apk \
+            /tmp/aligned.apk
+          "$ANDROID_HOME/build-tools/$BT/apksigner" verify \
+            build/app/outputs/flutter-apk/app-release-signed.apk
+          rm -f /tmp/upload.keystore /tmp/unsigned.apk /tmp/aligned.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-apk-arm64
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/app-release-signed.apk
