@@ -179,6 +179,10 @@ class _ChatScreenState extends State<ChatScreen> {
       request.headers['Content-Type'] = 'application/json; charset=utf-8';
       request.headers['Accept'] = 'text/event-stream';
       request.headers['Cache-Control'] = 'no-cache';
+      // ВАЖНО: только gzip. Kimi отдаёт SSE в brotli (br), что ломает
+      // поток в HTTP-клиентах (известный баг, github hermes-agent#28043).
+      request.headers['Accept-Encoding'] = 'gzip';
+      request.headers['Connection'] = 'keep-alive';
 
       final body = <String, dynamic>{
         'model': model,
@@ -187,7 +191,6 @@ class _ChatScreenState extends State<ChatScreen> {
         'stream_options': {'include_usage': true},
       };
       if (isKimi) {
-        // По документации Kimi: max_completion_tokens (max_tokens deprecated).
         body['max_completion_tokens'] = _maxTokens;
         if (_reasoningEffort != 'default') {
           body['reasoning_effort'] = _reasoningEffort;
@@ -440,6 +443,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final dc = TextEditingController(text: _dsKey);
     final mc = TextEditingController(text: _maxTokens.toString());
     final tc = TextEditingController(text: _timeoutSec.toString());
+    String km = _kimiModel;
+    String dm = TextEditingController(text: _timeoutSec.toString());
     String km = _kimiModel;
     String dm = _dsModel;
     String eff = _reasoningEffort;
