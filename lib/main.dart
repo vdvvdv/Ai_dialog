@@ -246,6 +246,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final out = <Map<String, dynamic>>[];
       for (final m in (d['data'] as List)) {
         final id = m['id'].toString();
+        if (id.isEmpty) continue;
         final meta = _modelMeta(id);
         out.add({
           'id': id,
