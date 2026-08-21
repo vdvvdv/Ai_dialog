@@ -87,6 +87,7 @@ class _ChatScreenState extends State<ChatScreen> {
   int _maxTokens = 32000;
   int _timeoutSec = 180;
   int _step = 0;
+  int _reqSeq = 0;
   String _target = 'both';
 
   @override
@@ -111,7 +112,6 @@ class _ChatScreenState extends State<ChatScreen> {
     _restoreState(p);
   }
 
-  /// Восстановление истории/очередей после перезапуска (Android убил процесс).
   void _restoreState(SharedPreferences p) {
     try {
       final raw = p.getString('state');
@@ -123,9 +123,10 @@ class _ChatScreenState extends State<ChatScreen> {
         }
         _inboxKimi.addAll(List<String>.from(d['kimi'] ?? []));
         _inboxDs.addAll(List<String>.from(d['ds'] ?? []));
-        _step = d['step'] ?? 0;
-        _historySummary = d['summary'] ?? '';
         _errorLog.addAll(List<String>.from(d['log'] ?? []));
+        _step = d['step'] ?? 0;
+        _reqSeq = d['reqseq'] ?? 0;
+        _historySummary = d['summary'] ?? '';
       });
       if (_history.isNotEmpty) {
         setState(() => _status =
@@ -136,7 +137,6 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Сохранение состояния при каждом изменении.
   Future<void> _persistState() async {
     try {
       final p = await SharedPreferences.getInstance();
@@ -146,9 +146,10 @@ class _ChatScreenState extends State<ChatScreen> {
             'history': _history,
             'kimi': _inboxKimi,
             'ds': _inboxDs,
-            'step': _step,
-            'summary': _historySummary,
             'log': _errorLog,
+            'step': _step,
+            'reqseq': _reqSeq,
+            'summary': _historySummary,
           }));
     } catch (_) {}
   }
@@ -166,19 +167,19 @@ class _ChatScreenState extends State<ChatScreen> {
     await p.setBool('show_thinking', _showThinking);
   }
 
-  void _logOk(String who, String info) {
+  // ---------- Журнал ----------
+
+  void _logLine(String line) {
     final t = DateTime.now().toString().substring(11, 19);
-    _errorLog.add('[$t] OK $who: $info');
-    if (_errorLog.length > 100) _errorLog.removeAt(0);
+    _errorLog.add('[$t] $line');
+    if (_errorLog.length > 500) _errorLog.removeAt(0);
     _persistState();
   }
 
-  void _logError(String who, String err) {
-    final t = DateTime.now().toString().substring(11, 19);
-    _errorLog.add('[$t] $who: $err');
-    if (_errorLog.length > 100) _errorLog.removeAt(0);
-    _persistState();
-  }
+  void _logError(String who, String err) => _logLine('ERR $who: $err');
+
+  /// Структурированная запись о запросе (JSON в одну строку).
+  void _logReq(Map<String, dynamic> m) => _logLine(jsonEncode(m));
 
   String _now() => DateTime.now().toString().substring(11, 19);
 
@@ -355,10 +356,11 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // ---------- Потоковый запрос ----------
+  // ---------- Потоковый запрос с метриками ----------
 
   Future<String> _apiOnce(String url, String key, String model,
-      List<Map<String, String>> msgs, void Function(String) onChunk) async {
+      List<Map<String, String>> msgs, void Function(String) onChunk,
+      Map<String, dynamic> metrics) async {
     final client = http.Client();
     final isKimi = url.contains('moonshot');
     String finishReason = '';
@@ -366,6 +368,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final buf = StringBuffer();
     final thinkBuf = StringBuffer();
     var broken = false;
+    var chunks = 0;
+    DateTime? firstChunkAt;
+    final startedAt = DateTime.now();
 
     try {
       final request = http.Request('POST', Uri.parse(url));
@@ -375,6 +380,7 @@ class _ChatScreenState extends State<ChatScreen> {
       request.headers['Cache-Control'] = 'no-cache';
       request.headers['Accept-Encoding'] = 'gzip';
       request.headers['Connection'] = 'keep-alive';
+      request.headers['User-Agent'] = 'ai_dialog/$_appVersion';
 
       final body = <String, dynamic>{
         'model': model,
@@ -384,13 +390,22 @@ class _ChatScreenState extends State<ChatScreen> {
       };
       if (isKimi) {
         body['max_completion_tokens'] = _maxTokens;
-        if (_reasoningEffort != 'default') {
+        final thinkingModel = model.startsWith('kimi-k3') ||
+            model.startsWith('kimi-k2.6') ||
+            model.contains('thinking');
+        if (_reasoningEffort != 'default' && thinkingModel) {
           body['reasoning_effort'] = _reasoningEffort;
         }
       } else {
         body['max_tokens'] = _maxTokens;
       }
       request.body = jsonEncode(body);
+      metrics['params'] = {
+        'max_tokens': _maxTokens,
+        'effort': body['reasoning_effort'] ?? 'default',
+        'hist_msgs': msgs.length,
+        'est_tokens': _estTokens(msgs),
+      };
 
       final response =
           await client.send(request).timeout(const Duration(seconds: 60));
@@ -399,6 +414,7 @@ class _ChatScreenState extends State<ChatScreen> {
         final errBody = await response.stream.bytesToString();
         final short =
             errBody.length > 300 ? '${errBody.substring(0, 300)}…' : errBody;
+        metrics['http'] = response.statusCode;
         throw 'HTTP ${response.statusCode}: $short';
       }
 
@@ -426,6 +442,10 @@ class _ChatScreenState extends State<ChatScreen> {
             if (delta != null) {
               final rc = delta['reasoning_content'];
               final c = delta['content'];
+              if (rc != null || c != null) {
+                chunks++;
+                firstChunkAt ??= DateTime.now();
+              }
               if (rc != null) thinkBuf.write(rc);
               if (c != null) buf.write(c);
               if (buf.isNotEmpty) {
@@ -442,6 +462,7 @@ class _ChatScreenState extends State<ChatScreen> {
       } catch (e) {
         if (buf.isNotEmpty || thinkBuf.isNotEmpty) {
           broken = true;
+          metrics['broken'] = e.toString();
         } else {
           rethrow;
         }
@@ -450,14 +471,29 @@ class _ChatScreenState extends State<ChatScreen> {
       client.close();
     }
 
+    metrics['first_ms'] =
+        firstChunkAt?.difference(startedAt).inMilliseconds ?? -1;
+    metrics['total_ms'] = DateTime.now().difference(startedAt).inMilliseconds;
+    metrics['chunks'] = chunks;
+    metrics['finish'] = finishReason.isEmpty ? null : finishReason;
+    metrics['broken_flag'] = broken;
+    if (usage != null) {
+      metrics['in'] = usage!['prompt_tokens'];
+      metrics['out'] = usage!['completion_tokens'];
+      final ct = usage!['completion_tokens_details'];
+      if (ct is Map && ct['reasoning_tokens'] != null) {
+        metrics['think'] = ct['reasoning_tokens'];
+      }
+    }
+
     if (usage != null && mounted) {
       final lim = _contextLimit(model);
       final pt = usage!['prompt_tokens'] ?? 0;
       final pct = lim > 0 ? (100 * pt / lim).toStringAsFixed(0) : '?';
       setState(() => _status =
           '📊 вх $pt / вых ${usage!['completion_tokens'] ?? '?'}'
-          '${usage!['reasoning_tokens'] != null ? ' (разм: ${usage!['reasoning_tokens']})' : ''}'
-          ' · контекст $pct%');
+          '${metrics['think'] != null ? ' (разм: ${metrics['think']})' : ''}'
+          ' · контекст $pct% · 1й токен ${metrics['first_ms']}мс');
     }
 
     var result = buf.toString();
@@ -491,20 +527,32 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<String> _apiStream(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk) async {
     const maxAttempts = 4;
+    final id = ++_reqSeq;
     var attempt = 0;
+    final metrics = <String, dynamic>{'id': id, 'model': model};
     while (true) {
       attempt++;
       try {
-        return await _apiOnce(url, key, model, msgs, onChunk);
+        final r = await _apiOnce(url, key, model, msgs, onChunk, metrics);
+        metrics['ok'] = true;
+        metrics['retry'] = attempt - 1;
+        _logReq(metrics);
+        return r;
       } catch (e) {
         final err = e.toString();
+        metrics['error'] = err.length > 200 ? err.substring(0, 200) : err;
         final noRetry = err.startsWith('HTTP 400') ||
             err.startsWith('HTTP 401') ||
             err.startsWith('HTTP 403') ||
             err.startsWith('HTTP 404') ||
             err.startsWith('Пустой ответ') ||
             err.startsWith('Обрыв во время размышлений');
-        if (noRetry || attempt >= maxAttempts) rethrow;
+        if (noRetry || attempt >= maxAttempts) {
+          metrics['ok'] = false;
+          metrics['retry'] = attempt - 1;
+          _logReq(metrics);
+          rethrow;
+        }
 
         var wait = _retryAfterSec(err);
         if (wait <= 0) wait = 2 * attempt;
@@ -550,7 +598,8 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _loading = true;
       _status = '';
-      _history.add({'role': who, 'content': '…', 'time': _now(), 'step': '$step'});
+      _history.add(
+          {'role': who, 'content': '…', 'time': _now(), 'step': '$step'});
     });
     final idx = _history.length - 1;
     _scrollBottom();
@@ -559,7 +608,6 @@ class _ChatScreenState extends State<ChatScreen> {
         if (mounted) setState(() => _history[idx]['content'] = partial);
       });
       sw.stop();
-      _logOk('$who ($model)', 'шаг $step, ${sw.elapsed.inSeconds}с, $_status');
       setState(() {
         inbox.removeAt(0);
         _history[idx]['content'] = r;
@@ -576,7 +624,6 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       _persistState();
       final whoName = who == 'kimi' ? 'Kimi' : 'DeepSeek';
-      _logError('$whoName ($model)', e.toString());
       _showErrorDialog(
           whoName, e.toString(), () => who == 'kimi' ? _callKimi() : _callDs());
     }
@@ -893,9 +940,9 @@ class _ChatScreenState extends State<ChatScreen> {
     };
     final step = m['step'];
     final secs = m['secs'];
+    final tm = m['time'];
     if (step != null) base += ' · шаг $step';
     if (secs != null) base += ' · ${secs}с';
-    final tm = m['time'];
     if (tm != null) base += ' · $tm';
     return base;
   }
@@ -1264,7 +1311,7 @@ class _QueueScreenState extends State<QueueScreen> {
   }
 }
 
-/// Экран лога ошибок с копированием.
+/// Экран журнала запросов и ошибок с копированием.
 class ErrorLogScreen extends StatelessWidget {
   final List<String> log;
   const ErrorLogScreen({super.key, required this.log});
@@ -1281,15 +1328,15 @@ class ErrorLogScreen extends StatelessWidget {
             onPressed: () {
               Clipboard.setData(ClipboardData(text: log.join('\n')));
               ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Лог скопирован')));
+                  const SnackBar(content: Text('Журнал скопирован')));
             },
           ),
         ],
       ),
       body: log.isEmpty
           ? const Center(
-              child: Text('Ошибок пока нет 🎉',
-                  style: TextStyle(color: Colors.grey)))
+              child:
+                  Text('Пока пусто', style: TextStyle(color: Colors.grey)))
           : ListView.builder(
               padding: const EdgeInsets.all(8),
               itemCount: log.length,
