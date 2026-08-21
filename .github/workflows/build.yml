@@ -48,12 +48,12 @@ jobs:
       - name: Analyze (non-blocking)
         run: flutter analyze --no-fatal-infos --no-fatal-warnings || true
 
-      - name: Build split APKs (release)
+      - name: Build arm64 APK (release)
         run: |
-          flutter build apk --release --split-per-abi \
+          flutter build apk --release --target-platform android-arm64 \
             --obfuscate --split-debug-info=./debug_info
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-apk
-          path: build/app/outputs/flutter-apk/app-*-release.apk
+          name: release-apk-arm64
+          path: build/app/outputs/flutter-apk/app-release.apk

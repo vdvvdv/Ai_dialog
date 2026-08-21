@@ -42,11 +42,12 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  static const _kimiUrl = 'https://api.moonshot.ai/v1/chat/completions'\;
-  static const _dsUrl = 'https://api.deepseek.com/v1/chat/completions'\;
+  static const _kimiUrl = 'https://api.moonshot.ai/v1/chat/completions';
+  static const _dsUrl = 'https://api.deepseek.com/v1/chat/completions';
 
   static const _kimiModels = [
     'kimi-k2-0905-preview',
+    'kimi-k3',
     'kimi-k2.6',
     'kimi-k2.5',
     'moonshot-v1-8k',
@@ -57,6 +58,7 @@ class _ChatScreenState extends State<ChatScreen> {
     'deepseek-chat',
     'deepseek-reasoner',
   ];
+  static const _efforts = ['default', 'low', 'medium', 'high'];
 
   final List<Map<String, String>> _history = [];
   final List<String> _inboxKimi = [];
@@ -72,6 +74,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String _dsKey = '';
   String _kimiModel = 'kimi-k2-0905-preview';
   String _dsModel = 'deepseek-chat';
+  String _reasoningEffort = 'default';
   int _maxTokens = 4000;
   int _timeoutSec = 180;
   String _target = 'both';
@@ -89,6 +92,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _dsKey = p.getString('ds_key') ?? '';
       _kimiModel = p.getString('kimi_model') ?? _kimiModel;
       _dsModel = p.getString('ds_model') ?? _dsModel;
+      _reasoningEffort = p.getString('reasoning_effort') ?? _reasoningEffort;
       _maxTokens = p.getInt('max_tokens') ?? _maxTokens;
       _timeoutSec = p.getInt('timeout_sec') ?? _timeoutSec;
       _showThinking = p.getBool('show_thinking') ?? _showThinking;
@@ -101,6 +105,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await p.setString('ds_key', _dsKey);
     await p.setString('kimi_model', _kimiModel);
     await p.setString('ds_model', _dsModel);
+    await p.setString('reasoning_effort', _reasoningEffort);
     await p.setInt('max_tokens', _maxTokens);
     await p.setInt('timeout_sec', _timeoutSec);
     await p.setBool('show_thinking', _showThinking);
@@ -137,9 +142,8 @@ class _ChatScreenState extends State<ChatScreen> {
       final r = h['role'] as String;
       var c = h['content'] as String;
       if (c.trim().isEmpty || c == '…' || c.startsWith('💭')) continue;
-      // Убираем служебную пометку об обрыве из контекста.
-      const marker = '\n\n⚠️ (соединение оборвалось — ответ неполный)';
-      if (c.endsWith(marker)) c = c.substring(0, c.length - marker.length);
+      final cut = c.indexOf('\n\n⚠️ (');
+      if (cut > 0) c = c.substring(0, cut);
       if (r == 'user') {
         msgs.add({'role': 'user', 'content': c});
       } else if (r == 'kimi' && who == 'kimi') {
@@ -158,17 +162,16 @@ class _ChatScreenState extends State<ChatScreen> {
   // ---------- Потоковый запрос ----------
 
   /// Один запрос — один проход по потоку.
-  /// Если соединение оборвалось ПОСЛЕ того, как пришли данные, —
-  /// возвращает частичный ответ с пометкой, а НЕ бросает ошибку.
-  /// Бросает ошибку только если не получено ничего.
+  /// Обрыв ПОСЛЕ получения данных = частичный ответ с пометкой, без retry.
   Future<String> _apiOnce(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk) async {
     final client = http.Client();
+    final isKimi = url.contains('moonshot');
     String finishReason = '';
-    String usage = '';
-    final buf = StringBuffer();      // финальный ответ (content)
-    final thinkBuf = StringBuffer(); // размышления (reasoning_content)
-    var broken = false;              // поток оборвался на середине
+    Map<String, dynamic>? usage;
+    final buf = StringBuffer();
+    final thinkBuf = StringBuffer();
+    var broken = false;
 
     try {
       final request = http.Request('POST', Uri.parse(url));
@@ -176,15 +179,26 @@ class _ChatScreenState extends State<ChatScreen> {
       request.headers['Content-Type'] = 'application/json; charset=utf-8';
       request.headers['Accept'] = 'text/event-stream';
       request.headers['Cache-Control'] = 'no-cache';
-      request.body = jsonEncode({
+
+      final body = <String, dynamic>{
         'model': model,
         'messages': msgs,
-        'max_tokens': _maxTokens,
         'stream': true,
-      });
+        'stream_options': {'include_usage': true},
+      };
+      if (isKimi) {
+        // По документации Kimi: max_completion_tokens (max_tokens deprecated).
+        body['max_completion_tokens'] = _maxTokens;
+        if (_reasoningEffort != 'default') {
+          body['reasoning_effort'] = _reasoningEffort;
+        }
+      } else {
+        body['max_tokens'] = _maxTokens;
+      }
+      request.body = jsonEncode(body);
 
       final response = await client.send(request)
-          .timeout(const Duration(seconds: 60)); // таймаут на УСТАНОВКУ
+          .timeout(const Duration(seconds: 60));
 
       if (response.statusCode != 200) {
         final errBody = await response.stream.bytesToString();
@@ -208,11 +222,13 @@ class _ChatScreenState extends State<ChatScreen> {
           if (data == '[DONE]') break;
           try {
             final j = jsonDecode(data);
+            if (j['usage'] != null) {
+              usage = Map<String, dynamic>.from(j['usage']);
+            }
             final choice = j['choices']?[0];
             final delta = choice?['delta'];
             final fr = choice?['finish_reason'];
             if (fr != null) finishReason = fr.toString();
-            if (j['usage'] != null) usage = j['usage'].toString();
             if (delta != null) {
               final rc = delta['reasoning_content'];
               final c = delta['content'];
@@ -232,15 +248,21 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         }
       } catch (e) {
-        // Обрыв посреди потока (Connection closed, TimeoutException и т.п.)
+        // Обрыв посреди потока: данные есть — работаем с частичным ответом.
         if (buf.isNotEmpty || thinkBuf.isNotEmpty) {
-          broken = true; // данные есть — работаем с частичным ответом
+          broken = true;
         } else {
-          rethrow; // не получено ничего — это ошибка, можно retry
+          rethrow;
         }
       }
     } finally {
       client.close();
+    }
+
+    if (usage != null && mounted) {
+      setState(() => _status =
+          '📊 токены: вх ${usage!['prompt_tokens'] ?? '?'} / вых ${usage!['completion_tokens'] ?? '?'}'
+          '${usage!['reasoning_tokens'] != null ? ' (разм: ${usage!['reasoning_tokens']})' : ''}');
     }
 
     var result = buf.toString();
@@ -249,22 +271,21 @@ class _ChatScreenState extends State<ChatScreen> {
       final thought = thinkBuf.length;
       if (broken && thought > 0) {
         throw 'Обрыв во время размышлений ($thought симв.), ответ не начался. '
-            'Попробуйте модель без размышлений (kimi-k2-0905-preview) или повторите.';
+            'Попробуйте модель без размышлений или понизьте reasoning_effort.';
       }
       throw 'Пустой ответ (finish_reason: ${finishReason.isEmpty ? "нет" : finishReason}'
-          '${thought > 0 ? ", размышлений: $thought симв. — возможно, max_tokens=$_maxTokens ушёл на них; увеличьте лимит" : ""}'
-          '${usage.isEmpty ? "" : ", usage: $usage"})';
+          '${thought > 0 ? ", размышлений: $thought симв. — возможно, лимит $_maxTokens ушёл на них" : ""}'
+          '${usage != null ? ", usage: $usage" : ""})';
     }
 
     if (broken) {
       result += '\n\n⚠️ (соединение оборвалось — ответ неполный)';
     } else if (finishReason == 'length') {
-      result += '\n\n⚠️ (ответ обрезан по max_tokens=$_maxTokens — увеличьте лимит в настройках)';
+      result += '\n\n⚠️ (ответ обрезан по лимиту $_maxTokens токенов — увеличьте в настройках)';
     }
     return result;
   }
 
-  /// Вытаскивает из текста ошибки "try again after N seconds".
   int _retryAfterSec(String err) {
     final m = RegExp(r'after (\d+) second').firstMatch(err);
     if (m != null) return int.tryParse(m.group(1)!) ?? 0;
@@ -272,7 +293,6 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   /// Retry ТОЛЬКО если не получено ни байта (429, 5xx, мгновенный обрыв).
-  /// Частичные ответы не перезапрашиваются.
   Future<String> _apiStream(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk) async {
     const maxAttempts = 4;
@@ -328,6 +348,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final msgs = _buildMsgs(who);
     setState(() {
       _loading = true;
+      _status = '';
       _history.add({'role': who, 'content': '…'});
     });
     final idx = _history.length - 1;
@@ -421,6 +442,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final tc = TextEditingController(text: _timeoutSec.toString());
     String km = _kimiModel;
     String dm = _dsModel;
+    String eff = _reasoningEffort;
     bool showThink = _showThinking;
     showDialog(
       context: context,
@@ -461,11 +483,21 @@ class _ChatScreenState extends State<ChatScreen> {
                   onChanged: (v) => setD(() => dm = v ?? dm),
                 ),
                 const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  value: _efforts.contains(eff) ? eff : _efforts.first,
+                  decoration: const InputDecoration(
+                      labelText: 'Глубина размышлений (Kimi)'),
+                  items: _efforts
+                      .map((m) => DropdownMenuItem(value: m, child: Text(m)))
+                      .toList(),
+                  onChanged: (v) => setD(() => eff = v ?? eff),
+                ),
+                const SizedBox(height: 8),
                 TextField(
                   controller: mc,
                   keyboardType: TextInputType.number,
                   decoration:
-                      const InputDecoration(labelText: 'max_tokens (лимит ответа)'),
+                      const InputDecoration(labelText: 'Лимит токенов ответа'),
                 ),
                 const SizedBox(height: 8),
                 TextField(
@@ -494,6 +526,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   _dsKey = dc.text.trim();
                   _kimiModel = km;
                   _dsModel = dm;
+                  _reasoningEffort = eff;
                   _maxTokens = int.tryParse(mc.text) ?? _maxTokens;
                   _timeoutSec = int.tryParse(tc.text) ?? _timeoutSec;
                   _showThinking = showThink;
