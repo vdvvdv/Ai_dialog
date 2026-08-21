@@ -216,7 +216,7 @@ class _ChatScreenState extends State<ChatScreen> {
               // Отображение: ответ; пока его нет — ход размышлений.
               if (buf.isNotEmpty) {
                 onChunk(buf.toString());
-              } else if (thinkBuf.isNotEmpty) {
+              } else if (thinkBuf.isNotEmpty && _showThinking) {
                 final t = thinkBuf.toString();
                 final tail = t.length > 500 ? '…${t.substring(t.length - 500)}' : t;
                 onChunk('💭 $tail');
