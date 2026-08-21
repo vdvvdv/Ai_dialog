@@ -125,6 +125,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _inboxDs.addAll(List<String>.from(d['ds'] ?? []));
         _step = d['step'] ?? 0;
         _historySummary = d['summary'] ?? '';
+        _errorLog.addAll(List<String>.from(d['log'] ?? []));
       });
       if (_history.isNotEmpty) {
         setState(() => _status =
@@ -147,6 +148,7 @@ class _ChatScreenState extends State<ChatScreen> {
             'ds': _inboxDs,
             'step': _step,
             'summary': _historySummary,
+            'log': _errorLog,
           }));
     } catch (_) {}
   }
@@ -164,10 +166,18 @@ class _ChatScreenState extends State<ChatScreen> {
     await p.setBool('show_thinking', _showThinking);
   }
 
+  void _logOk(String who, String info) {
+    final t = DateTime.now().toString().substring(11, 19);
+    _errorLog.add('[$t] OK $who: $info');
+    if (_errorLog.length > 100) _errorLog.removeAt(0);
+    _persistState();
+  }
+
   void _logError(String who, String err) {
     final t = DateTime.now().toString().substring(11, 19);
     _errorLog.add('[$t] $who: $err');
     if (_errorLog.length > 100) _errorLog.removeAt(0);
+    _persistState();
   }
 
   String _now() => DateTime.now().toString().substring(11, 19);
@@ -549,6 +559,7 @@ class _ChatScreenState extends State<ChatScreen> {
         if (mounted) setState(() => _history[idx]['content'] = partial);
       });
       sw.stop();
+      _logOk('$who ($model)', 'шаг $step, ${sw.elapsed.inSeconds}с, $_status');
       setState(() {
         inbox.removeAt(0);
         _history[idx]['content'] = r;
@@ -1262,7 +1273,7 @@ class ErrorLogScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('🐞 Лог ошибок (${log.length})'),
+        title: Text('🐞 Журнал (${log.length})'),
         actions: [
           IconButton(
             icon: const Icon(Icons.copy),
