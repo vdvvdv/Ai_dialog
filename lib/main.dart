@@ -416,9 +416,9 @@ class _ChatScreenState extends State<ChatScreen> {
     onLine(await _benchLv('Kimi', _kimiUrl, _kimiKey, _kimiModel,
         'short', 'Ответь одним словом: ок', 2000));
     onLine(await _benchLv('Kimi', _kimiUrl, _kimiKey, _kimiModel,
-        'mid', 'Напиши ровно 100 слов о погоде.', 2000));
+        'mid', 'Напиши ровно 100 слов о погоде.', 4000));
     onLine(await _benchLv('Kimi', _kimiUrl, _kimiKey, _kimiModel,
-        'long', 'Напиши подробный рассказ про космос, примерно 400 слов.', 4000));
+        'long', 'Напиши подробный рассказ про космос, примерно 400 слов.', 8000));
     onLine('— DeepSeek ($_dsModel) —');
     onLine(await _benchLv('DeepSeek', _dsUrl, _dsKey, _dsModel,
         'short', 'Ответь одним словом: ок', 1000));
