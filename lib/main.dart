@@ -79,6 +79,8 @@ class _ChatScreenState extends State<ChatScreen> {
   List<Map<String, dynamic>> _kimiInfo = [];
   List<Map<String, dynamic>> _dsInfo = [];
   String _modelsSrc = 'встроенный список';
+  String _modelsErr = '';
+  String _connInfo = '';
 
   bool _loading = false;
   bool _autoLoop = false;
@@ -263,20 +265,32 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     var got = 0;
+    _modelsErr = '';
+    _connInfo = '';
     if (_kimiKey.isNotEmpty) {
+      var swK = Stopwatch()..start();
       try {
         _kimiInfo = await one(_kimiBase, _kimiKey);
         got++;
+        _connInfo += 'Kimi ✓ ${swK.elapsedMilliseconds}мс  ';
       } catch (e) {
         _logError('models-kimi', e.toString());
+        var m = e.toString();
+        if (m.length > 60) m = m.substring(0, 60);
+        _modelsErr += 'Kimi: $m; ';
       }
     }
     if (_dsKey.isNotEmpty) {
+      var swD = Stopwatch()..start();
       try {
         _dsInfo = await one(_dsBase, _dsKey);
         got++;
+        _connInfo += 'DeepSeek ✓ ${swD.elapsedMilliseconds}мс';
       } catch (e) {
         _logError('models-ds', e.toString());
+        var m = e.toString();
+        if (m.length > 60) m = m.substring(0, 60);
+        _modelsErr += 'DS: $m; ';
       }
     }
     _modelsSrc = got > 0 ? 'с сервера' : 'встроенный список';
@@ -989,7 +1003,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     (v) => setD(() => dm = v)),
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('Список моделей: $_modelsSrc',
+                  child: Text('Список моделей: $_modelsSrc\n$_connInfo${_modelsErr.isEmpty ? '' : '\n⚠️ $_modelsErr'}',
                       style:
                           const TextStyle(fontSize: 10, color: Colors.grey)),
                 ),
