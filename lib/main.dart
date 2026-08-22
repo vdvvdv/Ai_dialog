@@ -89,6 +89,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _stopRequested = false;
   bool _awaitingComment = false;
   bool _showThinking = true;
+  bool _noStreamKimi = false;
   String _status = '';
   String _kimiKey = '';
   String _dsKey = '';
@@ -121,6 +122,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _maxTokens = p.getInt('max_tokens') ?? _maxTokens;
       _timeoutSec = p.getInt('timeout_sec') ?? _timeoutSec;
       _showThinking = p.getBool('show_thinking') ?? _showThinking;
+      _noStreamKimi = p.getBool('no_stream_kimi') ?? _noStreamKimi;
     });
     _restoreState(p);
   }
@@ -178,6 +180,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await p.setInt('max_tokens', _maxTokens);
     await p.setInt('timeout_sec', _timeoutSec);
     await p.setBool('show_thinking', _showThinking);
+    await p.setBool('no_stream_kimi', _noStreamKimi);
   }
 
   // ---------- Журнал ----------
@@ -791,7 +794,9 @@ class _ChatScreenState extends State<ChatScreen> {
     while (true) {
       attempt++;
       try {
-        final r = await _apiOnce(url, key, model, msgs, onChunk, metrics);
+        final forceNs = _noStreamKimi && model.contains('kimi');
+        final r = await _apiOnce(url, key, model, msgs, onChunk, metrics,
+            noStream: forceNs);
         metrics['ok'] = true;
         metrics['retry'] = attempt - 1;
         _logReq(metrics);
@@ -1094,6 +1099,7 @@ class _ChatScreenState extends State<ChatScreen> {
     String eff = _reasoningEffort;
     String strat = _keepStrategy;
     bool showThink = _showThinking;
+    bool noStream = _noStreamKimi;
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -1204,6 +1210,14 @@ class _ChatScreenState extends State<ChatScreen> {
                   value: showThink,
                   onChanged: (v) => setD(() => showThink = v),
                 ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text(
+                      'Kimi без стриминга (надёжнее, ответ целиком)',
+                      style: TextStyle(fontSize: 14)),
+                  value: noStream,
+                  onChanged: (v) => setD(() => noStream = v),
+                ),
                 const SizedBox(height: 8),
                 Text('Версия приложения: $_appVersion',
                     style: const TextStyle(fontSize: 12, color: Colors.grey)),
@@ -1226,6 +1240,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   _maxTokens = int.tryParse(mc.text) ?? _maxTokens;
                   _timeoutSec = int.tryParse(tc.text) ?? _timeoutSec;
                   _showThinking = showThink;
+                  _noStreamKimi = noStream;
                 });
                 _saveSettings();
                 Navigator.pop(ctx);
