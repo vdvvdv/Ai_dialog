@@ -82,6 +82,8 @@ class _ChatScreenState extends State<ChatScreen> {
   String _modelsErr = '';
   String _connInfo = '';
 
+  http.Client? _activeClient;
+  bool _aborted = false;
   bool _loading = false;
   bool _autoLoop = false;
   bool _stopRequested = false;
@@ -267,6 +269,7 @@ class _ChatScreenState extends State<ChatScreen> {
     var got = 0;
     _modelsErr = '';
     _connInfo = '';
+    final net = await _netInfo();
     if (_kimiKey.isNotEmpty) {
       var swK = Stopwatch()..start();
       final vpnK = await _vpnActive();
@@ -275,7 +278,7 @@ class _ChatScreenState extends State<ChatScreen> {
         got++;
         _connInfo += 'Kimi ✓ ${swK.elapsedMilliseconds}мс  ';
         _logReq({'type': 'models', 'who': 'kimi',
-            'ms': swK.elapsedMilliseconds, 'ok': true, 'vpn': vpnK});
+            'ms': swK.elapsedMilliseconds, 'ok': true, 'vpn': vpnK, 'net': net});
       } catch (e) {
         _logError('models-kimi', e.toString());
         _logReq({'type': 'models', 'who': 'kimi',
@@ -293,7 +296,7 @@ class _ChatScreenState extends State<ChatScreen> {
         got++;
         _connInfo += 'DeepSeek ✓ ${swD.elapsedMilliseconds}мс';
         _logReq({'type': 'models', 'who': 'deepseek',
-            'ms': swD.elapsedMilliseconds, 'ok': true, 'vpn': vpnD});
+            'ms': swD.elapsedMilliseconds, 'ok': true, 'vpn': vpnD, 'net': net});
       } catch (e) {
         _logError('models-ds', e.toString());
         _logReq({'type': 'models', 'who': 'deepseek',
@@ -548,10 +551,36 @@ class _ChatScreenState extends State<ChatScreen> {
     return false;
   }
 
+  Future<String> _netInfo() async {
+    try {
+      final ifs = await NetworkInterface.list();
+      var vpn = false, wifi = false, gsm = false;
+      for (final i in ifs) {
+        if (i.addresses.isEmpty) continue;
+        final n = i.name.toLowerCase();
+        if (n.startsWith('tun') || n.startsWith('wg') || n.startsWith('ppp')) {
+          vpn = true;
+        }
+        if (n.startsWith('wlan') || n.startsWith('wifi') || n.startsWith('ap')) {
+          wifi = true;
+        }
+        if (n.startsWith('rmnet') || n.startsWith('ccmni')) gsm = true;
+      }
+      final parts = <String>[];
+      if (wifi) parts.add('wifi');
+      if (gsm) parts.add('gsm');
+      if (vpn) parts.add('vpn');
+      return parts.isEmpty ? 'unknown' : parts.join('+');
+    } catch (_) {
+      return 'unknown';
+    }
+  }
+
   Future<String> _apiOnce(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk,
       Map<String, dynamic> metrics, {bool noStream = false}) async {
     final client = http.Client();
+    _activeClient = client;
     final isKimi = url.contains('moonshot');
     String finishReason = '';
     Map<String, dynamic>? usage;
@@ -689,6 +718,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     } finally {
       client.close();
+      if (_activeClient == client) _activeClient = null;
     }
 
     metrics['first_ms'] =
@@ -757,6 +787,7 @@ class _ChatScreenState extends State<ChatScreen> {
     var attempt = 0;
     final metrics = <String, dynamic>{'id': id, 'model': model, 'url': url};
     metrics['vpn'] = await _vpnActive();
+    metrics['net'] = await _netInfo();
     while (true) {
       attempt++;
       try {
@@ -767,6 +798,13 @@ class _ChatScreenState extends State<ChatScreen> {
         return r;
       } catch (e) {
         final err = e.toString();
+        if (_aborted) {
+          _aborted = false;
+          metrics['ok'] = false;
+          metrics['aborted'] = true;
+          _logReq(metrics);
+          throw '⛔ Запрос принудительно оборван пользователем';
+        }
         metrics['error'] = err.length > 200 ? err.substring(0, 200) : err;
         final isTimeout = err.contains('TimeoutException');
         final noRetry = (isTimeout && attempt >= 2) ||
@@ -1022,6 +1060,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _auto();
   }
 
+  void _abortRequest() {
+    if (!_loading) return;
+    _aborted = true;
+    _logLine('⛔ Пользователь оборвал запрос (шаг $_step)');
+    _activeClient?.close();
+  }
+
   void _scrollBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
@@ -1251,6 +1296,12 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: AppBar(
         title: const Text('🤖 Kimi ↔ DeepSeek', style: TextStyle(fontSize: 15)),
         actions: [
+          if (_loading)
+            IconButton(
+                icon: const Icon(Icons.stop_circle,
+                    color: Colors.redAccent, size: 20),
+                tooltip: 'Оборвать запрос',
+                onPressed: _abortRequest),
           IconButton(
               icon: const Icon(Icons.delete_outline, size: 20),
               tooltip: 'Очистить всё',
