@@ -550,7 +550,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<String> _apiOnce(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk,
-      Map<String, dynamic> metrics) async {
+      Map<String, dynamic> metrics, {bool noStream = false}) async {
     final client = http.Client();
     final isKimi = url.contains('moonshot');
     String finishReason = '';
@@ -586,9 +586,10 @@ class _ChatScreenState extends State<ChatScreen> {
       final body = <String, dynamic>{
         'model': model,
         'messages': msgs,
-        'stream': true,
-        'stream_options': {'include_usage': true},
+        'stream': !noStream,
       };
+      if (!noStream) body['stream_options'] = {'include_usage': true};
+      if (noStream) metrics['nonstream'] = true;
       if (isKimi) {
         body['max_completion_tokens'] = _maxTokens;
         if (_reasoningEffort != 'default' && thinkingModel) {
@@ -616,6 +617,25 @@ class _ChatScreenState extends State<ChatScreen> {
         throw 'HTTP ${response.statusCode}: $short';
       }
 
+      if (noStream) {
+        final raw = await response.stream
+            .bytesToString()
+            .timeout(Duration(seconds: effTimeout * 2));
+        final j = jsonDecode(raw);
+        if (j['usage'] != null) {
+          usage = Map<String, dynamic>.from(j['usage']);
+        }
+        final msg = j['choices']?[0]?['message'];
+        final fr = j['choices']?[0]?['finish_reason'];
+        if (fr != null) finishReason = fr.toString();
+        if (msg?['reasoning_content'] != null) {
+          thinkBuf.write(msg!['reasoning_content'].toString());
+        }
+        if (msg?['content'] != null) buf.write(msg!['content'].toString());
+        chunks = 1;
+        firstChunkAt = DateTime.now();
+        if (buf.isNotEmpty) onChunk(buf.toString());
+      } else {
       final lines = response.stream
           .transform(utf8.decoder)
           .transform(const LineSplitter())
@@ -755,6 +775,28 @@ class _ChatScreenState extends State<ChatScreen> {
             err.startsWith('HTTP 404') ||
             err.startsWith('Пустой ответ') ||
             err.startsWith('Размышления прерваны');
+        if (err.startsWith('Размышления прерваны') &&
+            model.contains('kimi') &&
+            !metrics.containsKey('ns_tried')) {
+          metrics['ns_tried'] = true;
+          if (mounted) {
+            setState(() => _status =
+                '🔁 Поток заглох — повтор без стриминга (может занять минуты)…');
+          }
+          try {
+            final r2 = await _apiOnce(url, key, model, msgs, onChunk, metrics,
+                noStream: true);
+            metrics['ok'] = true;
+            metrics['retry'] = attempt;
+            _logReq(metrics);
+            if (mounted) setState(() => _status = '');
+            return r2;
+          } catch (e2) {
+            final m2 = e2.toString();
+            metrics['ns_error'] =
+                m2.length > 150 ? m2.substring(0, 150) : m2;
+          }
+        }
         if (noRetry || attempt >= maxAttempts) {
           metrics['ok'] = false;
           metrics['retry'] = attempt - 1;
