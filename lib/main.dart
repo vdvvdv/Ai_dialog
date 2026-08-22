@@ -85,6 +85,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   http.Client? _activeClient;
   bool _aborted = false;
+  bool _lastNonStream = false;
   bool _loading = false;
   bool _autoLoop = false;
   bool _stopRequested = false;
@@ -567,24 +568,41 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<String> _netInfo() async {
     try {
-      final ifs = await NetworkInterface.list();
-      var vpn = false, wifi = false, gsm = false;
-      for (final i in ifs) {
-        if (i.addresses.isEmpty) continue;
-        final n = i.name.toLowerCase();
-        if (n.startsWith('tun') || n.startsWith('wg') || n.startsWith('ppp')) {
-          vpn = true;
+      // Активный интерфейс — по дефолтному маршруту
+      String? active;
+      final f = File('/proc/net/route');
+      if (f.existsSync()) {
+        for (final l in f.readAsLinesSync()) {
+          final p = l.trim().split(RegExp(r'\s+'));
+          if (p.length > 1 && p[1] == '00000000') {
+            active = p[0].toLowerCase();
+            break;
+          }
         }
-        if (n.startsWith('wlan') || n.startsWith('wifi') || n.startsWith('ap')) {
-          wifi = true;
-        }
-        if (n.startsWith('rmnet') || n.startsWith('ccmni')) gsm = true;
       }
-      final parts = <String>[];
-      if (wifi) parts.add('wifi');
-      if (gsm) parts.add('gsm');
-      if (vpn) parts.add('vpn');
-      return parts.isEmpty ? 'unknown' : parts.join('+');
+      String kindOf(String n) {
+        if (n.startsWith('tun') || n.startsWith('wg') || n.startsWith('ppp')) {
+          return 'vpn';
+        }
+        if (n.startsWith('wlan') || n.startsWith('ap')) return 'wifi';
+        if (n.startsWith('rmnet') || n.startsWith('ccmni')) return 'gsm';
+        return n;
+      }
+
+      var result = active != null ? '${kindOf(active)}($active)' : 'unknown';
+      // VPN поднят, но маршрут не через него — отметим отдельно
+      if (active != null && !active.startsWith('tun')) {
+        final ifs = await NetworkInterface.list();
+        for (final i in ifs) {
+          final n = i.name.toLowerCase();
+          if (i.addresses.isNotEmpty &&
+              (n.startsWith('tun') || n.startsWith('wg'))) {
+            result += '+vpn-up';
+            break;
+          }
+        }
+      }
+      return result;
     } catch (_) {
       return 'unknown';
     }
@@ -809,6 +827,7 @@ class _ChatScreenState extends State<ChatScreen> {
         final forceNs = _noStreamKimi && model.contains('kimi');
         final r = await _apiOnce(url, key, model, msgs, onChunk, metrics,
             noStream: forceNs);
+        _lastNonStream = forceNs || metrics['nonstream'] == true;
         metrics['ok'] = true;
         metrics['retry'] = attempt - 1;
         _logReq(metrics);
@@ -842,6 +861,7 @@ class _ChatScreenState extends State<ChatScreen> {
           try {
             final r2 = await _apiOnce(url, key, model, msgs, onChunk, metrics,
                 noStream: true);
+            _lastNonStream = true;
             metrics['ok'] = true;
             metrics['retry'] = attempt;
             _logReq(metrics);
@@ -932,6 +952,7 @@ class _ChatScreenState extends State<ChatScreen> {
         inbox.removeAt(0);
         _history[idx]['content'] = r;
         _history[idx]['secs'] = '${sw.elapsed.inSeconds}';
+        _history[idx]['ns'] = _lastNonStream ? 'целиком' : 'стрим';
         otherInbox.add(r);
       });
       _persistState();
@@ -976,6 +997,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     final tc = TextEditingController(text: _maxTokens.toString());
     String eff = _reasoningEffort;
+    bool ns = _noStreamKimi;
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -1004,6 +1026,14 @@ class _ChatScreenState extends State<ChatScreen> {
                       .toList(),
                   onChanged: (v) => setD(() => eff = v ?? eff),
                 ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(
+                      'Kimi без стриминга: ${ns ? "вкл" : "выкл"}',
+                      style: const TextStyle(fontSize: 13)),
+                  value: ns,
+                  onChanged: (v) => setD(() => ns = v),
+                ),
               ],
             ),
           ),
@@ -1023,6 +1053,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 setState(() {
                   _maxTokens = int.tryParse(tc.text) ?? _maxTokens;
                   _reasoningEffort = eff;
+                  _noStreamKimi = ns;
                 });
                 _saveSettings();
                 Navigator.pop(ctx);
@@ -1312,6 +1343,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final tm = m['time'];
     if (step != null) base += ' · шаг $step';
     if (secs != null) base += ' · ${secs}с';
+    final ns = m['ns'];
+    if (ns != null) base += ' · $ns';
     if (tm != null) base += ' · $tm';
     return base;
   }
