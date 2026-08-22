@@ -282,6 +282,27 @@ class _ChatScreenState extends State<ChatScreen> {
     _modelsSrc = got > 0 ? 'с сервера' : 'встроенный список';
   }
 
+  Future<String> _testEndpoint(String name, String base, String key) async {
+    if (key.isEmpty) return '$name: нет ключа';
+    final sw = Stopwatch()..start();
+    try {
+      final r = await http.get(Uri.parse('$base/models'), headers: {
+        'Authorization': 'Bearer $key',
+        'Accept-Encoding': 'gzip',
+      }).timeout(const Duration(seconds: 10));
+      sw.stop();
+      if (r.statusCode == 200) {
+        return '$name: ✓ ${sw.elapsedMilliseconds} мс';
+      }
+      return '$name: ✗ HTTP ${r.statusCode} (${sw.elapsedMilliseconds} мс)';
+    } catch (e) {
+      sw.stop();
+      var msg = e.toString();
+      if (msg.length > 80) msg = msg.substring(0, 80);
+      return '$name: ✗ $msg';
+    }
+  }
+
   Widget _modelDropdown(String label, String value,
       List<Map<String, dynamic>> info, List<String> fallback,
       void Function(String) onChanged) {
@@ -933,6 +954,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final dc = TextEditingController(text: _dsKey);
     final mc = TextEditingController(text: _maxTokens.toString());
     final tc = TextEditingController(text: _timeoutSec.toString());
+    String testK = '';
+    String testD = '';
     String km = _kimiModel;
     String dm = _dsModel;
     String eff = _reasoningEffort;
@@ -970,6 +993,36 @@ class _ChatScreenState extends State<ChatScreen> {
                       style:
                           const TextStyle(fontSize: 10, color: Colors.grey)),
                 ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.network_check, size: 16),
+                        label: const Text('Проверить соединение',
+                            style: TextStyle(fontSize: 12)),
+                        onPressed: () async {
+                          setD(() {
+                            testK = 'Kimi: …';
+                            testD = 'DeepSeek: …';
+                          });
+                          final k = await _testEndpoint(
+                              'Kimi', _kimiBase, kc.text.trim());
+                          setD(() => testK = k);
+                          final d = await _testEndpoint(
+                              'DeepSeek', _dsBase, dc.text.trim());
+                          setD(() => testD = d);
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+                if (testK.isNotEmpty || testD.isNotEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('$testK\n$testD',
+                        style: const TextStyle(fontSize: 12)),
+                  ),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
                   value: _efforts.contains(eff) ? eff : _efforts.first,
