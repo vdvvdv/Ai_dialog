@@ -126,6 +126,15 @@ class _ChatScreenState extends State<ChatScreen> {
       _showThinking = p.getBool('show_thinking') ?? _showThinking;
       _noStreamKimi = p.getBool('no_stream_kimi') ?? _noStreamKimi;
     });
+    // Одноразовая миграция: стрим Moonshot нестабилен, форсируем рабочие значения
+    if (p.getBool('migrated_v58') != true) {
+      if (_noStreamKimi == false) _noStreamKimi = true;
+      if (_maxTokens > 4000) _maxTokens = 4000;
+      if (_reasoningEffort == 'default') _reasoningEffort = 'low';
+      await p.setBool('migrated_v58', true);
+      await _saveSettings();
+      _logLine('🔧 Миграция v58: нестрим вкл, лимит 4000, effort=low');
+    }
     _restoreState(p);
   }
 
