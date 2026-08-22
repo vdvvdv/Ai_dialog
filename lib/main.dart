@@ -47,6 +47,7 @@ class _ChatScreenState extends State<ChatScreen> {
   static const _dsBase = 'https://api.deepseek.com/v1';
   static const _kimiUrl = '$_kimiBase/chat/completions';
   static const _dsUrl = '$_dsBase/chat/completions';
+  static const _netCh = MethodChannel('ai_dialog/net');
   static const _appVersion =
       String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
 
@@ -273,6 +274,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _modelsErr = '';
     _connInfo = '';
     final net = await _netInfo();
+    final cell = await _cellInfo();
     if (_kimiKey.isNotEmpty) {
       var swK = Stopwatch()..start();
       final vpnK = await _vpnActive();
@@ -281,7 +283,7 @@ class _ChatScreenState extends State<ChatScreen> {
         got++;
         _connInfo += 'Kimi ✓ ${swK.elapsedMilliseconds}мс  ';
         _logReq({'type': 'models', 'who': 'kimi',
-            'ms': swK.elapsedMilliseconds, 'ok': true, 'vpn': vpnK, 'net': net});
+            'ms': swK.elapsedMilliseconds, 'ok': true, 'vpn': vpnK, 'net': net, 'cell': cell});
       } catch (e) {
         _logError('models-kimi', e.toString());
         _logReq({'type': 'models', 'who': 'kimi',
@@ -299,7 +301,7 @@ class _ChatScreenState extends State<ChatScreen> {
         got++;
         _connInfo += 'DeepSeek ✓ ${swD.elapsedMilliseconds}мс';
         _logReq({'type': 'models', 'who': 'deepseek',
-            'ms': swD.elapsedMilliseconds, 'ok': true, 'vpn': vpnD, 'net': net});
+            'ms': swD.elapsedMilliseconds, 'ok': true, 'vpn': vpnD, 'net': net, 'cell': cell});
       } catch (e) {
         _logError('models-ds', e.toString());
         _logReq({'type': 'models', 'who': 'deepseek',
@@ -540,6 +542,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   // ---------- Потоковый запрос с метриками ----------
+
+  Future<String> _cellInfo() async {
+    try {
+      final r = await _netCh.invokeMethod<String>('cellInfo');
+      return r ?? 'n/a';
+    } catch (_) {
+      return 'n/a';
+    }
+  }
 
   Future<bool> _vpnActive() async {
     try {
@@ -791,6 +802,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final metrics = <String, dynamic>{'id': id, 'model': model, 'url': url};
     metrics['vpn'] = await _vpnActive();
     metrics['net'] = await _netInfo();
+    metrics['cell'] = await _cellInfo();
     while (true) {
       attempt++;
       try {
