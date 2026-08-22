@@ -269,12 +269,17 @@ class _ChatScreenState extends State<ChatScreen> {
     _connInfo = '';
     if (_kimiKey.isNotEmpty) {
       var swK = Stopwatch()..start();
+      final vpnK = await _vpnActive();
       try {
         _kimiInfo = await one(_kimiBase, _kimiKey);
         got++;
         _connInfo += 'Kimi ✓ ${swK.elapsedMilliseconds}мс  ';
+        _logReq({'type': 'models', 'who': 'kimi',
+            'ms': swK.elapsedMilliseconds, 'ok': true, 'vpn': vpnK});
       } catch (e) {
         _logError('models-kimi', e.toString());
+        _logReq({'type': 'models', 'who': 'kimi',
+            'ms': swK.elapsedMilliseconds, 'ok': false, 'vpn': vpnK});
         var m = e.toString();
         if (m.length > 60) m = m.substring(0, 60);
         _modelsErr += 'Kimi: $m; ';
@@ -282,12 +287,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     if (_dsKey.isNotEmpty) {
       var swD = Stopwatch()..start();
+      final vpnD = await _vpnActive();
       try {
         _dsInfo = await one(_dsBase, _dsKey);
         got++;
         _connInfo += 'DeepSeek ✓ ${swD.elapsedMilliseconds}мс';
+        _logReq({'type': 'models', 'who': 'deepseek',
+            'ms': swD.elapsedMilliseconds, 'ok': true, 'vpn': vpnD});
       } catch (e) {
         _logError('models-ds', e.toString());
+        _logReq({'type': 'models', 'who': 'deepseek',
+            'ms': swD.elapsedMilliseconds, 'ok': false, 'vpn': vpnD});
         var m = e.toString();
         if (m.length > 60) m = m.substring(0, 60);
         _modelsErr += 'DS: $m; ';
@@ -525,6 +535,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // ---------- Потоковый запрос с метриками ----------
 
+  Future<bool> _vpnActive() async {
+    try {
+      final ifs = await NetworkInterface.list();
+      for (final i in ifs) {
+        final n = i.name.toLowerCase();
+        if (n.startsWith('tun') || n.startsWith('wg') || n.startsWith('ppp')) {
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
+
   Future<String> _apiOnce(String url, String key, String model,
       List<Map<String, String>> msgs, void Function(String) onChunk,
       Map<String, dynamic> metrics) async {
@@ -544,8 +567,9 @@ class _ChatScreenState extends State<ChatScreen> {
         model.contains('thinking') ||
         model.contains('reasoner');
     var effTimeout = _timeoutSec;
-    if (thinkingModel && _reasoningEffort == 'high' && effTimeout < 300) {
-      effTimeout = 300;
+    if (thinkingModel && effTimeout < 300) effTimeout = 300;
+    if (thinkingModel && _reasoningEffort == 'high' && effTimeout < 600) {
+      effTimeout = 600;
     }
     if (effTimeout < 60) effTimeout = 60;
 
@@ -676,8 +700,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (result.trim().isEmpty) {
       final thought = thinkBuf.length;
       if (broken && thought > 0) {
-        throw 'Обрыв во время размышлений ($thought симв.), ответ не начался. '
-            'Понизьте reasoning_effort или смените модель.';
+        final how = metrics['broken'].toString().contains('TimeoutException')
+            ? 'тишина в потоке дольше таймаута — модель замолчала на середине'
+            : 'соединение разорвано извне (сервер или VPN)';
+        throw 'Размышления прерваны ($thought симв.): $how. '
+            'Параметры запроса ни при чём — проверьте сеть/VPN, смените сервер.';
       }
       throw 'Пустой ответ (finish_reason: ${finishReason.isEmpty ? "нет" : finishReason}'
           '${thought > 0 ? ", размышлений: $thought симв." : ""}'
@@ -685,7 +712,10 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     if (broken) {
-      result += '\n\n⚠️ (соединение оборвалось — ответ неполный)';
+      final how = (metrics['broken'] ?? '').toString().contains('TimeoutException')
+          ? 'тишина в потоке'
+          : 'соединение разорвано извне';
+      result += '\n\n⚠️ ($how — ответ неполный)';
     } else if (finishReason == 'length') {
       result +=
           '\n\n⚠️ (ответ обрезан по лимиту $_maxTokens токенов — увеличьте в настройках)';
@@ -705,6 +735,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final id = ++_reqSeq;
     var attempt = 0;
     final metrics = <String, dynamic>{'id': id, 'model': model, 'url': url};
+    metrics['vpn'] = await _vpnActive();
     while (true) {
       attempt++;
       try {
@@ -723,7 +754,7 @@ class _ChatScreenState extends State<ChatScreen> {
             err.startsWith('HTTP 403') ||
             err.startsWith('HTTP 404') ||
             err.startsWith('Пустой ответ') ||
-            err.startsWith('Обрыв во время размышлений');
+            err.startsWith('Размышления прерваны');
         if (noRetry || attempt >= maxAttempts) {
           metrics['ok'] = false;
           metrics['retry'] = attempt - 1;
