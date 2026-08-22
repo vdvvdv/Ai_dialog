@@ -91,7 +91,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _stopRequested = false;
   bool _awaitingComment = false;
   bool _showThinking = true;
-  bool _noStreamKimi = false;
+  bool _noStreamKimi = true; // стрим Moonshot нестабилен (журнал), нестрим надёжен
   String _status = '';
   String _kimiKey = '';
   String _dsKey = '';
@@ -100,7 +100,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String _reasoningEffort = 'default';
   String _keepStrategy = 'smart';
   String _historySummary = '';
-  int _maxTokens = 32000;
+  int _maxTokens = 4000; // цель < 3 мин (~40 ток/с у K2.7)
   int _timeoutSec = 180;
   int _step = 0;
   int _reqSeq = 0;
@@ -365,6 +365,65 @@ class _ChatScreenState extends State<ChatScreen> {
       if (m.length > 70) m = m.substring(0, 70);
       return '$name: ✗ $m';
     }
+  }
+
+  /// Один прогон бенчмарка. Настройки жёсткие: не зависят от ручных.
+  Future<String> _benchLv(String name, String url, String key, String model,
+      String level, String prompt, int maxTok) async {
+    if (key.isEmpty) return '$name/$level: нет ключа';
+    final metrics = <String, dynamic>{
+      'id': ++_reqSeq, 'model': model, 'url': url, 'bench': true,
+      'bench_level': level, 'bench_max': maxTok,
+      'net': await _netInfo(), 'cell': await _cellInfo(),
+      'vpn': await _vpnActive(),
+    };
+    final ns = model.contains('kimi'); // Kimi — всегда целиком (стрим нестабилен)
+    final savedMax = _maxTokens;
+    final savedEff = _reasoningEffort;
+    _maxTokens = maxTok;
+    _reasoningEffort = 'low';
+    try {
+      await _apiOnce(url, key, model,
+          [{'role': 'user', 'content': prompt}], (_) {}, metrics,
+          noStream: ns);
+      final first = metrics['first_ms'] ?? -1;
+      final total = metrics['total_ms'] ?? 0;
+      final out = metrics['out'] ?? 0;
+      final span = (ns || first <= 0) ? total : total - first;
+      final tbt = (out is int && out > 1)
+          ? (span / (out - 1)).toStringAsFixed(0)
+          : '?';
+      metrics['ok'] = true;
+      metrics['tbt_ms'] = tbt;
+      _logReq(metrics);
+      return '$name/$level: ${total}мс · $out ток · TBT ~$tbtмс${ns ? " · целиком" : ""}';
+    } catch (e) {
+      metrics['ok'] = false;
+      metrics['error'] = e.toString();
+      _logReq(metrics);
+      var m = e.toString();
+      if (m.length > 50) m = m.substring(0, 50);
+      return '$name/$level: ✗ $m';
+    } finally {
+      _maxTokens = savedMax;
+      _reasoningEffort = savedEff;
+    }
+  }
+
+  /// Серия прогонов: Kimi short/mid/long, DeepSeek short/mid.
+  Future<void> _benchPro(void Function(String) onLine) async {
+    onLine('— Kimi ($_kimiModel) —');
+    onLine(await _benchLv('Kimi', _kimiUrl, _kimiKey, _kimiModel,
+        'short', 'Ответь одним словом: ок', 2000));
+    onLine(await _benchLv('Kimi', _kimiUrl, _kimiKey, _kimiModel,
+        'mid', 'Напиши ровно 100 слов о погоде.', 2000));
+    onLine(await _benchLv('Kimi', _kimiUrl, _kimiKey, _kimiModel,
+        'long', 'Напиши подробный рассказ про космос, примерно 400 слов.', 4000));
+    onLine('— DeepSeek ($_dsModel) —');
+    onLine(await _benchLv('DeepSeek', _dsUrl, _dsKey, _dsModel,
+        'short', 'Ответь одним словом: ок', 1000));
+    onLine(await _benchLv('DeepSeek', _dsUrl, _dsKey, _dsModel,
+        'mid', 'Напиши ровно 100 слов о погоде.', 1000));
   }
 
   Widget _modelDropdown(String label, String value,
@@ -1170,6 +1229,7 @@ class _ChatScreenState extends State<ChatScreen> {
     String testD = '';
     String benchK = '';
     String benchD = '';
+    String benchPro = '';
     String km = _kimiModel;
     String dm = _dsModel;
     String eff = _reasoningEffort;
@@ -1264,6 +1324,29 @@ class _ChatScreenState extends State<ChatScreen> {
                     alignment: Alignment.centerLeft,
                     child: Text('$benchK\n$benchD',
                         style: const TextStyle(fontSize: 12)),
+                  ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.speed, size: 16),
+                    label: const Text('Бенчмарк PRO: Kimi 3 уровня + DS 2',
+                        style: TextStyle(fontSize: 12)),
+                    onPressed: () async {
+                      setD(() => benchPro = '\u23f3 Идёт PRO-тест, до ~3 минут…');
+                      final buf = StringBuffer();
+                      await _benchPro((s) {
+                        buf.writeln(s);
+                        setD(() => benchPro = buf.toString().trim());
+                      });
+                    },
+                  ),
+                ),
+                if (benchPro.isNotEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(benchPro,
+                        style: const TextStyle(fontSize: 11)),
                   ),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
