@@ -503,6 +503,16 @@ class _ChatScreenState extends State<ChatScreen> {
     var chunks = 0;
     DateTime? firstChunkAt;
     final startedAt = DateTime.now();
+    final thinkingModel = model.startsWith('kimi-k3') ||
+        model.startsWith('kimi-k2.7') ||
+        model.startsWith('kimi-k2.6') ||
+        model.contains('thinking') ||
+        model.contains('reasoner');
+    var effTimeout = _timeoutSec;
+    if (thinkingModel && _reasoningEffort == 'high' && effTimeout < 300) {
+      effTimeout = 300;
+    }
+    if (effTimeout < 60) effTimeout = 60;
 
     try {
       final request = http.Request('POST', Uri.parse(url));
@@ -522,10 +532,6 @@ class _ChatScreenState extends State<ChatScreen> {
       };
       if (isKimi) {
         body['max_completion_tokens'] = _maxTokens;
-        final thinkingModel = model.startsWith('kimi-k3') ||
-            model.startsWith('kimi-k2.7') ||
-            model.startsWith('kimi-k2.6') ||
-            model.contains('thinking');
         if (_reasoningEffort != 'default' && thinkingModel) {
           body['reasoning_effort'] = _reasoningEffort;
         }
@@ -541,7 +547,7 @@ class _ChatScreenState extends State<ChatScreen> {
       };
 
       final response =
-          await client.send(request).timeout(const Duration(seconds: 60));
+          await client.send(request).timeout(Duration(seconds: effTimeout));
 
       if (response.statusCode != 200) {
         final errBody = await response.stream.bytesToString();
@@ -554,7 +560,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final lines = response.stream
           .transform(utf8.decoder)
           .transform(const LineSplitter())
-          .timeout(Duration(seconds: _timeoutSec));
+          .timeout(Duration(seconds: effTimeout));
 
       try {
         await for (final rawLine in lines) {
@@ -675,7 +681,9 @@ class _ChatScreenState extends State<ChatScreen> {
       } catch (e) {
         final err = e.toString();
         metrics['error'] = err.length > 200 ? err.substring(0, 200) : err;
-        final noRetry = err.startsWith('HTTP 400') ||
+        final isTimeout = err.contains('TimeoutException');
+        final noRetry = (isTimeout && attempt >= 2) ||
+            err.startsWith('HTTP 400') ||
             err.startsWith('HTTP 401') ||
             err.startsWith('HTTP 403') ||
             err.startsWith('HTTP 404') ||
@@ -729,6 +737,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final step = ++_step;
     final sw = Stopwatch()..start();
+    var firstChunk = false;
+    final waitTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!firstChunk && mounted) {
+        setState(() => _status =
+            '🧠 $who: жду первый токен… ${t.tick}с ($model'
+            '${_reasoningEffort != 'default' ? ', effort=$_reasoningEffort' : ''})');
+      }
+    });
     setState(() {
       _loading = true;
       _status = '';
@@ -739,7 +755,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollBottom();
     try {
       final r = await _apiStream(url, key, model, finalMsgs, (partial) {
-        if (mounted) setState(() => _history[idx]['content'] = partial);
+        firstChunk = true;
+        if (mounted) {
+          setState(() {
+            _history[idx]['content'] = partial;
+            if (_status.startsWith('🧠')) _status = '';
+          });
+        }
       });
       sw.stop();
       setState(() {
@@ -761,6 +783,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _showErrorDialog(
           whoName, e.toString(), () => who == 'kimi' ? _callKimi() : _callDs());
     }
+    waitTimer.cancel();
+    if (mounted && _status.startsWith('🧠')) setState(() => _status = '');
     if (mounted) setState(() => _loading = false);
   }
 
