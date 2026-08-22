@@ -336,6 +336,37 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<String> _bench(String name, String url, String key, String model) async {
+    if (key.isEmpty) return '$name: нет ключа';
+    final metrics = <String, dynamic>{
+      'id': ++_reqSeq, 'model': model, 'url': url, 'bench': true,
+      'net': await _netInfo(), 'cell': await _cellInfo(),
+      'vpn': await _vpnActive(),
+    };
+    try {
+      await _apiOnce(url, key, model,
+          [{'role': 'user', 'content': 'Ответь одним словом: ок'}],
+          (_) {}, metrics);
+      final first = metrics['first_ms'] ?? -1;
+      final total = metrics['total_ms'] ?? 0;
+      final out = metrics['out'] ?? 0;
+      final tbt = (out is int && out > 1)
+          ? ((total - first) / (out - 1)).toStringAsFixed(0)
+          : '?';
+      metrics['ok'] = true;
+      metrics['tbt_ms'] = tbt;
+      _logReq(metrics);
+      return '$name: TTFT ${first}мс · TBT ~${tbt}мс/ток';
+    } catch (e) {
+      metrics['ok'] = false;
+      metrics['error'] = e.toString();
+      _logReq(metrics);
+      var m = e.toString();
+      if (m.length > 70) m = m.substring(0, 70);
+      return '$name: ✗ $m';
+    }
+  }
+
   Widget _modelDropdown(String label, String value,
       List<Map<String, dynamic>> info, List<String> fallback,
       void Function(String) onChanged) {
@@ -1137,6 +1168,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final tc = TextEditingController(text: _timeoutSec.toString());
     String testK = '';
     String testD = '';
+    String benchK = '';
+    String benchD = '';
     String km = _kimiModel;
     String dm = _dsModel;
     String eff = _reasoningEffort;
@@ -1203,6 +1236,33 @@ class _ChatScreenState extends State<ChatScreen> {
                   Align(
                     alignment: Alignment.centerLeft,
                     child: Text('$testK\n$testD',
+                        style: const TextStyle(fontSize: 12)),
+                  ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.bolt, size: 16),
+                    label: const Text('Бенчмарк TTFT/TBT (обе модели)',
+                        style: TextStyle(fontSize: 12)),
+                    onPressed: () async {
+                      setD(() {
+                        benchK = 'Kimi: …';
+                        benchD = 'DeepSeek: …';
+                      });
+                      final k = await _bench(
+                          'Kimi', _kimiUrl, _kimiKey, _kimiModel);
+                      setD(() => benchK = k);
+                      final d = await _bench(
+                          'DeepSeek', _dsUrl, _dsKey, _dsModel);
+                      setD(() => benchD = d);
+                    },
+                  ),
+                ),
+                if (benchK.isNotEmpty || benchD.isNotEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('$benchK\n$benchD',
                         style: const TextStyle(fontSize: 12)),
                   ),
                 const SizedBox(height: 8),
