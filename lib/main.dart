@@ -686,6 +686,7 @@ class _ChatScreenState extends State<ChatScreen> {
           rethrow;
         }
       }
+      }
     } finally {
       client.close();
     }
