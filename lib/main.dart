@@ -750,13 +750,17 @@ class _ChatScreenState extends State<ChatScreen> {
       };
       if (!noStream) body['stream_options'] = {'include_usage': true};
       if (noStream) metrics['nonstream'] = true;
+      // Бенчмарк — жёсткий лимит; диалог — адаптивное окно
+      final maxTok =
+          metrics['bench'] == true ? _maxTokens : _adaptiveMaxTokens();
+      metrics['max_adaptive'] = maxTok;
       if (isKimi) {
-        body['max_completion_tokens'] = _maxTokens;
+        body['max_completion_tokens'] = maxTok;
         if (_reasoningEffort != 'default' && thinkingModel) {
           body['reasoning_effort'] = _reasoningEffort;
         }
       } else {
-        body['max_tokens'] = _maxTokens;
+        body['max_tokens'] = maxTok;
       }
       request.body = jsonEncode(body);
       metrics['params'] = {
@@ -900,9 +904,31 @@ class _ChatScreenState extends State<ChatScreen> {
       result += '\n\n⚠️ ($how — ответ неполный)';
     } else if (finishReason == 'length') {
       result +=
-          '\n\n⚠️ (ответ обрезан по лимиту $_maxTokens токенов — увеличьте в настройках)';
+          '\n\n⚠️ (ответ обрезан по лимиту $maxTok токенов — окно адаптивное, потолок в настройках)';
     }
     return result;
+  }
+
+  /// Адаптивное окно токенов: по типичной длине прошлых ответов моделей.
+  int _adaptiveMaxTokens() {
+    final lens = <int>[];
+    for (final h in _history.reversed) {
+      final r = h['role'];
+      if (r == 'kimi' || r == 'ds') {
+        var c = h['content'] ?? '';
+        final cut = c.indexOf('\n\n⚠️ (');
+        if (cut > 0) c = c.substring(0, cut);
+        if (c.trim().isNotEmpty && c != '…') lens.add(c.length ~/ 3);
+        if (lens.length >= 6) break;
+      }
+    }
+    var base = 1500; // истории нет — скромное окно
+    if (lens.isNotEmpty) {
+      lens.sort();
+      base = lens[(lens.length * 0.8).floor().clamp(0, lens.length - 1)];
+    }
+    // x2.5 — запас на размышления Kimi и рост ответа; 1500.._maxTokens
+    return (base * 5 ~/ 2).clamp(1500, _maxTokens);
   }
 
   int _retryAfterSec(String err) {
@@ -1389,7 +1415,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   controller: mc,
                   keyboardType: TextInputType.number,
                   decoration: const InputDecoration(
-                      labelText: 'Лимит токенов ответа'),
+                      labelText: 'Потолок лимита токенов (окно адаптивное)'),
                 ),
                 const SizedBox(height: 8),
                 TextField(
