@@ -756,7 +756,13 @@ class _ChatScreenState extends State<ChatScreen> {
       metrics['max_adaptive'] = maxTok;
       if (isKimi) {
         body['max_completion_tokens'] = maxTok;
-        if (_reasoningEffort != 'default' && thinkingModel) {
+        // По доке Moonshot: k2.7-code требует БЕЗ reasoning_effort;
+        // k3 принимает только low/high/max; k2.6 — как раньше.
+        final m3 = model.startsWith('kimi-k3');
+        final m26 = model.startsWith('kimi-k2.6');
+        final effOk = _reasoningEffort != 'default' &&
+            ((m3 && ['low', 'high', 'max'].contains(_reasoningEffort)) || m26);
+        if (effOk) {
           body['reasoning_effort'] = _reasoningEffort;
         }
       } else {
