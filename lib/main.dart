@@ -910,7 +910,7 @@ class _ChatScreenState extends State<ChatScreen> {
       result += '\n\n⚠️ ($how — ответ неполный)';
     } else if (finishReason == 'length') {
       result +=
-          '\n\n⚠️ (ответ обрезан по лимиту $maxTok токенов — окно адаптивное, потолок в настройках)';
+          '\n\n⚠️ (ответ обрезан по лимиту ${metrics['max_adaptive'] ?? _maxTokens} токенов — окно адаптивное, потолок в настройках)';
     }
     return result;
   }
